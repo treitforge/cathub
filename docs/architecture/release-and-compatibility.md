@@ -17,9 +17,12 @@ tag does not publish to crates.io or NuGet.
 
 ## Registry publication order
 
-Registry publication requires the release owner's credentials and must occur only after the
-tagged release passes CI. Configure the `CARGO_REGISTRY_TOKEN` and `NUGET_API_KEY` Actions
-repository secrets, then dispatch the trusted publication workflow:
+Registry publication requires the release owner's authorization and must occur only after the
+tagged release passes CI. Configure the `CARGO_REGISTRY_TOKEN` Actions repository secret.
+On nuget.org, add a Trusted Publishing policy for repository owner `treitforge`, repository
+`cathub`, and workflow file `publish-registries.yml`. Leave the policy environment empty and
+set the `NUGET_USER` Actions repository variable to the policy owner's NuGet username. Then
+dispatch the publication workflow:
 
 ```powershell
 gh workflow run publish-registries.yml -f release_tag=v0.1.0
@@ -28,13 +31,14 @@ gh workflow run publish-registries.yml -f release_tag=v0.1.0
 The workflow rejects a draft or prerelease, verifies every release asset checksum, and checks
 that the tagged Rust and NuGet versions match. It publishes `cathub-protocol`, waits until
 Cargo can resolve that exact version from the crates.io index, publishes `cathub`, and then
-publishes `CatHub.Protocol`. Finally, it verifies both crates through the crates.io API and
-waits for the NuGet package to become available. Existing versions are detected so a retry
-can safely continue after a partial registry failure.
+uses GitHub OIDC to request a short-lived NuGet API key and publish `CatHub.Protocol`.
+Finally, it verifies both crates through the crates.io API and waits for the NuGet package to
+become available. Existing versions are detected so a retry can safely continue after a
+partial registry failure.
 
-Do not print either registry token. Verify package ownership, the expected version, and the
-tag before dispatching the workflow. The daemon crate depends on the same version of
-`cathub-protocol`.
+Do not print the crates.io token or the temporary NuGet key. Verify package ownership, the
+expected version, and the tag before dispatching the workflow. The daemon crate depends on
+the same version of `cathub-protocol`.
 
 ## Wire compatibility
 
