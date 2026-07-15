@@ -454,7 +454,7 @@
               <tr><td>OmniRig</td><td>Programs using the OmniRig automation API.</td><td>Native serial CAT and Hamlib NET clients cannot use that API directly.</td><td>Remains a coordinator for its clients and connects to a private CatHub serial endpoint.</td></tr>
               <tr><td>Hamlib <code>rigctld</code></td><td>Programs using the rigctld-compatible TCP protocol.</td><td>Programs requiring a COM port or vendor CAT dialect cannot connect to its socket.</td><td>Hamlib-aware programs connect to dedicated CatHub network endpoints.</td></tr>
               <tr><td>Direct serial CAT</td><td>One program speaking a supported vendor command set.</td><td>Serial ports are normally exclusive, and independent command streams cannot be safely combined.</td><td>Each program receives a private virtual COM pair backed by a CatHub serial endpoint.</td></tr>
-              <tr><td>Direct WinKeyer access</td><td>One host session using the stateful WinKeyer byte protocol.</td><td>Client state, buffered Morse, status bytes, and maintenance replies cannot be interleaved safely.</td><td>Legacy programs use private virtual endpoints; QsoRipper uses a typed loopback API.</td></tr>
+              <tr><td>Direct WinKeyer access</td><td>One host session using the stateful WinKeyer byte protocol.</td><td>Client state, buffered Morse, status bytes, and maintenance replies cannot be interleaved safely.</td><td>Legacy programs use private virtual endpoints; native clients use a typed loopback API.</td></tr>
             </tbody>
             <caption>Table 1. Existing coordinators solve compatibility within a client group, not across the complete station.</caption>
           </table>
@@ -500,8 +500,8 @@
           <div class="diagram-surface" role="img" aria-label="System context diagram. Logging, digital-mode, SDR, control, and CW applications connect to CatHub. CatHub alone connects to the physical radio and physical WinKeyer.">
             <div class="context-grid">
               <div class="context-apps">
-                <div class="box client"><strong>Radio applications</strong><small>Loggers, digital modes, SDR software, manufacturer control, and QsoRipper.</small></div>
-                <div class="box client"><strong>CW applications</strong><small>Legacy WinKeyer clients, maintenance tools, and QsoRipper CW clients.</small></div>
+                <div class="box client"><strong>Radio applications</strong><small>Loggers, digital modes, SDR software, and manufacturer control.</small></div>
+                <div class="box client"><strong>CW applications</strong><small>Legacy WinKeyer clients, maintenance tools, and typed API clients.</small></div>
               </div>
               <div class="context-arrow" aria-hidden="true">→</div>
               <div class="box hub context-hub"><strong>CatHub</strong><small>Endpoint adapters, shared state, radio broker, WinKeyer broker, permissions, scheduling, and station PTT ownership.</small></div>
@@ -535,7 +535,7 @@
               <div class="box interface interface-col radio-one"><strong>OmniRig</strong><small>Configured as a TS-2000 on its own virtual COM port.</small><span class="port">Example: COM11</span></div>
               <div class="arrow-cell interface-arrow radio-one" aria-hidden="true">→</div>
 
-              <div class="box client program-col radio-two"><strong>WSJT-X, JS8Call, Log4OM, QsoRipper</strong><small>Use Hamlib's NET rigctl model.</small></div>
+              <div class="box client program-col radio-two"><strong>WSJT-X, JS8Call, Log4OM, other loggers</strong><small>Use Hamlib's NET rigctl model.</small></div>
               <div class="arrow-cell program-arrow radio-two" aria-hidden="true">→</div>
               <div class="box interface interface-col radio-two"><strong>Hamlib NET endpoints</strong><small>Each policy group connects to a separate TCP listener.</small><span class="port">Example: 127.0.0.1:4532-4535</span></div>
               <div class="arrow-cell interface-arrow radio-two" aria-hidden="true">→</div>
@@ -554,7 +554,7 @@
               <div class="box interface interface-col keyer-one"><strong>Virtual WinKeyer endpoint</strong><small>Unmodified WinKeyer byte protocol over a private pair.</small><span class="port">Example: COM41 ⇄ COM40</span></div>
               <div class="arrow-cell interface-arrow keyer-one" aria-hidden="true">→</div>
 
-              <div class="box client program-col keyer-two"><strong>QsoRipper CW clients</strong><small>Submit named or expanded CW work.</small></div>
+              <div class="box client program-col keyer-two"><strong>Typed CW clients</strong><small>Submit named or expanded CW work.</small></div>
               <div class="arrow-cell program-arrow keyer-two" aria-hidden="true">→</div>
               <div class="box interface interface-col keyer-two"><strong>Typed WinKeyer gRPC service</strong><small>Named clients submit atomic jobs and receive status.</small><span class="port">Example: 127.0.0.1:50071</span></div>
               <div class="arrow-cell interface-arrow keyer-two" aria-hidden="true">→</div>
@@ -609,13 +609,13 @@
               <tr><td>HDSDR through OmniRig</td><td><code>COM11</code></td><td><code>COM10</code></td><td>TS-2000 CAT</td><td>Read, frequency write</td></tr>
               <tr><td>N1MM radio control</td><td><code>COM21</code></td><td><code>COM20</code></td><td>TS-590 CAT, single-VFO view</td><td>Read, write, PTT</td></tr>
               <tr><td>ARCP-590</td><td><code>COM31</code></td><td><code>COM30</code></td><td>TS-590 CAT with passthrough</td><td>Read, write, PTT, configuration write</td></tr>
-              <tr><td>QsoRipper engine</td><td><code>127.0.0.1:4532</code></td><td>TCP listener <code>:4532</code></td><td>Hamlib NET</td><td>Read</td></tr>
+              <tr><td>Read-only logger</td><td><code>127.0.0.1:4532</code></td><td>TCP listener <code>:4532</code></td><td>Hamlib NET</td><td>Read</td></tr>
               <tr><td>WSJT-X</td><td><code>127.0.0.1:4533</code></td><td>TCP listener <code>:4533</code></td><td>Hamlib NET, single-VFO view</td><td>Read, write, PTT</td></tr>
               <tr><td>Log4OM</td><td><code>127.0.0.1:4534</code></td><td>TCP listener <code>:4534</code></td><td>Hamlib NET, single-VFO view</td><td>Read, write</td></tr>
               <tr><td>JS8Call</td><td><code>127.0.0.1:4535</code></td><td>TCP listener <code>:4535</code></td><td>Hamlib NET, single-VFO view</td><td>Read, write, PTT</td></tr>
               <tr><td>N1MM CW</td><td><code>COM41</code></td><td><code>COM40</code></td><td>WinKeyer host protocol, 1200 baud 8-N-2</td><td>Status, send, control, PTT</td></tr>
               <tr><td>WKTools</td><td><code>COM43</code></td><td><code>COM42</code></td><td>WinKeyer maintenance</td><td>Status, control, configuration write</td></tr>
-              <tr><td>QsoRipper CW client</td><td><code>127.0.0.1:50071</code></td><td>Loopback gRPC service</td><td>Typed WinKeyer API</td><td>Named jobs, speed, status, cancel, abort</td></tr>
+              <tr><td>Typed CW client</td><td><code>127.0.0.1:50071</code></td><td>Loopback gRPC service</td><td>Typed WinKeyer API</td><td>Named jobs, speed, status, cancel, abort</td></tr>
             </tbody>
             <caption>Table 3. Example client-to-CatHub connection map. Every serial client has a private virtual pair.</caption>
           </table>
@@ -749,7 +749,7 @@
 
       <section id="configuration" aria-labelledby="configuration-heading">
         <h2 id="configuration-heading"><span class="section-number">10.</span> Configuration and deployment</h2>
-        <p>Operators configure physical devices first, then create one endpoint for each application or authority group. The examples below use standalone CatHub section names. In the unified QsoRipper configuration, the same sections are nested under <code>cat_hub</code>.</p>
+        <p>Operators configure physical devices first, then create one endpoint for each application or authority group. The examples below use standalone CatHub section names. Managed TOML documents may nest the same sections under <code>cat_hub</code>.</p>
 
         <h3>10.1 Physical hardware and safety limits</h3>
         <div class="code-block">
@@ -871,9 +871,8 @@
 
         <h3>References</h3>
         <ol class="references">
-          <li><a href="https://github.com/treitforge/qsoripper/blob/main/docs/architecture/engine-specification.md">QsoRipper engine specification</a>, especially the CAT hub endpoint, dialect, state, WinKeyer, and PTT contracts.</li>
           <li><a href="https://github.com/treitforge/cathub/blob/main/docs/design/multi-client-cat-hub.md">Multi-client CAT hub design</a> and <a href="https://github.com/treitforge/cathub/blob/main/docs/design/winkeyer-broker.md">multi-client WinKeyer broker design</a>.</li>
-          <li><a href="https://github.com/treitforge/cathub/blob/main/docs/integration/setup.md">CatHub operator setup</a> and <a href="https://github.com/treitforge/qsoripper/blob/main/docs/integrations/cw-keying.md">CW keying setup</a>.</li>
+          <li><a href="https://github.com/treitforge/cathub/blob/main/docs/integration/setup.md">CatHub operator setup</a> and <a href="https://github.com/treitforge/cathub/blob/main/docs/architecture/release-and-compatibility.md">release and compatibility policy</a>.</li>
           <li><a href="https://www.dxatlas.com/OmniRig/">OmniRig product documentation</a>.</li>
           <li><a href="https://hamlib.sourceforge.net/html/rigctld.1.html">Hamlib rigctld manual</a>.</li>
           <li><a href="https://learn.microsoft.com/en-us/windows/win32/devio/communications-resource-handles">Microsoft documentation for communications resource handles</a>.</li>

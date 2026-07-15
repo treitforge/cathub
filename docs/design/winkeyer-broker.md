@@ -2,11 +2,14 @@
 
 ## Decision
 
-CatHub is the sole owner of the physical WinKeyer serial port. QsoRipper engines use a typed loopback gRPC API. Each unmodified legacy program receives a dedicated virtual WinKeyer serial endpoint. The keyer subsystem is independent of the radio CAT actor, but both use the station PTT ownership manager.
+CatHub is the sole owner of the physical WinKeyer serial port. Native clients use a typed
+loopback gRPC API. Each unmodified legacy program receives a dedicated virtual WinKeyer
+serial endpoint. The keyer subsystem is independent of the radio CAT actor, but both use the
+station PTT ownership manager.
 
 ```text
 physical WinKeyer <-- 8-N-2 --> CatHub WinKeyer actor
-                                      |-- typed loopback API --> Rust/.NET engine
+                                      |-- typed loopback API --> native client
                                       |-- virtual COM endpoint ----> N1MM
                                       `-- virtual COM endpoint ----> maintenance tool
 ```
@@ -47,10 +50,14 @@ Reset, calibration, EEPROM dump/load, firmware update, high-baud switching, and 
 
 On acquisition, CatHub clears/dekeys and closes the physical host session before forwarding the administrative command, as required by the WinKeyer protocol. Other sends receive deterministic busy errors. Replies route only to the owner. On virtual Host Close or client loss, CatHub sends physical Host Open, waits for the firmware byte, reapplies safe initialization and the foreground transient profile, then resumes normal scheduling.
 
-Routine N1MM and QsoRipper operation never sends EEPROM writes. The normal N1MM endpoint should not receive `config_write`.
+Routine keying never requires EEPROM writes. Normal operating endpoints should not receive
+`config_write`.
 
 ## Configuration
 
-Unified configuration uses `[cat_hub.winkeyer]` and `[[cat_hub.winkeyer_endpoint]]`; standalone CatHub files omit the `cat_hub.` prefix. The API must bind to loopback. Physical and virtual transports must be distinct, only one endpoint may be primary, and dependent permission combinations are validated by CatHub and both setup engines.
+Standalone configuration uses `[winkeyer]` and `[[winkeyer_endpoint]]`. Managed documents
+place the same tables beneath `[cat_hub]`. The API must bind to loopback. Physical and virtual
+transports must be distinct, only one endpoint may be primary, and CatHub validates dependent
+permission combinations.
 
-See [CW keying setup](../integrations/cw-keying.md) for the complete operator workflow.
+See [operator setup](../integration/setup.md) for the complete workflow.

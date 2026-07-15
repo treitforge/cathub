@@ -1,7 +1,7 @@
 //! CatHub: a multi-client CAT and WinKeyer hub daemon.
 //!
 //! The daemon is the single owner of the radio link and fans it out to many client endpoints
-//! (HDSDR/OmniRig, N1MM Logger+, ARCP-590, WSJT-X, Log4OM, and the QsoRipper engine) over
+//! (loggers, digital-mode software, SDR software, and manufacturer control tools) over
 //! their native protocols. It serializes every write, owns the radio's native push stream,
 //! serves reads from a universal cache, arbitrates PTT with a single-owner lease, and never
 //! retargets a VFO during polling - eliminating the A/B oscillation, frequency drift, and
@@ -73,9 +73,8 @@ use crate::winkeyer::{
 pub use crate::error::CatHubError;
 
 /// Validate that a unified `config.toml` body contains a `[cat_hub]` section the
-/// cathub daemon will accept. This is exposed for the QsoRipper engine's setup
-/// wizard tests so a regression in the engine's CAT hub writer is caught against
-/// the daemon's real parser/validator rather than a hand-maintained copy.
+/// CatHub daemon will accept. This is exposed so managed-configuration clients can
+/// test their writers against the daemon's real parser and validator.
 ///
 /// # Errors
 ///
@@ -141,7 +140,7 @@ pub enum ConfigCommand {
     },
     /// Extract `[cat_hub]` from a unified file into a standalone file.
     Migrate {
-        /// Unified QsoRipper configuration containing `[cat_hub]`.
+        /// Managed configuration containing `[cat_hub]`.
         #[arg(long)]
         from: PathBuf,
         /// Destination standalone CatHub TOML file.

@@ -431,7 +431,7 @@ async fn ptt_lease_is_arbitrated_across_sessions() {
     assert_eq!(rig.ptt.owner(), Some(2));
 }
 
-/// The Hamlib net endpoint (engine / WSJT-X) and a serial endpoint share one radio state: a write on
+/// A Hamlib NET endpoint and a serial endpoint share one radio state: a write on
 /// the serial endpoint is read back over TCP, and a read-only endpoint rejects writes.
 #[tokio::test]
 async fn hamlib_net_and_serial_endpoint_share_radio_state() {
@@ -444,7 +444,7 @@ async fn hamlib_net_and_serial_endpoint_share_radio_state() {
         1,
     );
 
-    // A read-only Hamlib net endpoint (the QsoRipper engine).
+    // A read-only Hamlib NET endpoint.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let ro_ctx = ClientSessionContext::new(

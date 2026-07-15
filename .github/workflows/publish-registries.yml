@@ -1,0 +1,196 @@
+name: Publish registries
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Verified GitHub release tag to publish
+        required: true
+        default: v0.1.0
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-registries-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ inputs.release_tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v5.4.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Validate release input and credentials
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "release_tag must have the form vMAJOR.MINOR.PATCH"
+          }
+          "VERSION=$($Matches.version)" | Add-Content -LiteralPath $env:GITHUB_ENV
+          if ([string]::IsNullOrWhiteSpace($env:CARGO_REGISTRY_TOKEN)) {
+            throw "The CARGO_REGISTRY_TOKEN repository secret is not configured"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)) {
+            throw "The NUGET_API_KEY repository secret is not configured"
+          }
+
+      - name: Verify GitHub release and checksums
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh release view $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --json tagName,isDraft,isPrerelease | ConvertFrom-Json
+          if ($release.tagName -ne $env:RELEASE_TAG -or $release.isDraft -or $release.isPrerelease) {
+            throw "The requested tag is not a published stable GitHub release"
+          }
+
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          gh release download $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --dir release
+
+          $requiredAssets = @(
+            "cathub-$($env:RELEASE_TAG)-windows-x86_64.zip",
+            "cathub-$($env:RELEASE_TAG)-linux-x86_64.tar.gz",
+            "cathub-protocol-$($env:VERSION).crate",
+            "CatHub.Protocol.$($env:VERSION).nupkg"
+          )
+          foreach ($asset in $requiredAssets) {
+            if (-not (Test-Path -LiteralPath "release/$asset" -PathType Leaf)) {
+              throw "Required release asset is missing: $asset"
+            }
+            if (-not (Test-Path -LiteralPath "release/$asset.sha256" -PathType Leaf)) {
+              throw "Required checksum is missing: $asset.sha256"
+            }
+          }
+
+          Get-ChildItem -LiteralPath release -Filter *.sha256 | ForEach-Object {
+            $line = (Get-Content -LiteralPath $_.FullName -Raw).Trim()
+            if ($line -notmatch '^(?<hash>[a-f0-9]{64})  (?<file>.+)$') {
+              throw "Invalid checksum format: $($_.Name)"
+            }
+            $assetPath = Join-Path $_.DirectoryName $Matches.file
+            $actual = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $Matches.hash) {
+              throw "Checksum mismatch: $($Matches.file)"
+            }
+          }
+
+      - name: Verify source versions
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $rustPackages = $metadata.packages |
+            Where-Object { $_.name -in @('cathub', 'cathub-protocol') }
+          foreach ($package in $rustPackages) {
+            if ($package.version -ne $env:VERSION) {
+              throw "$($package.name) version $($package.version) does not match $($env:VERSION)"
+            }
+          }
+
+          [xml]$project = Get-Content -LiteralPath src/dotnet/CatHub.Protocol/CatHub.Protocol.csproj
+          $nugetVersion = [string]$project.Project.PropertyGroup.Version
+          if ($nugetVersion -ne $env:VERSION) {
+            throw "CatHub.Protocol version $nugetVersion does not match $($env:VERSION)"
+          }
+
+      - name: Publish cathub-protocol
+        shell: pwsh
+        run: |
+          $uri = "https://crates.io/api/v1/crates/cathub-protocol/$($env:VERSION)"
+          try {
+            Invoke-RestMethod -Uri $uri -Headers @{ 'User-Agent' = 'CatHub release workflow' } | Out-Null
+            Write-Host "cathub-protocol $($env:VERSION) is already published"
+          } catch {
+            if ($_.Exception.Response.StatusCode -ne 404) {
+              throw
+            }
+            cargo publish --locked -p cathub-protocol
+            if ($LASTEXITCODE -ne 0) {
+              throw "cargo publish failed for cathub-protocol"
+            }
+          }
+
+      - name: Wait for cathub-protocol indexing
+        shell: pwsh
+        run: |
+          $indexed = $false
+          foreach ($attempt in 1..60) {
+            cargo info "cathub-protocol@$($env:VERSION)" *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $indexed = $true
+              break
+            }
+            Write-Host "Waiting for crates.io indexing ($attempt/60)"
+            Start-Sleep -Seconds 10
+          }
+          if (-not $indexed) {
+            throw "cathub-protocol $($env:VERSION) was not indexed within 10 minutes"
+          }
+
+      - name: Publish cathub
+        shell: pwsh
+        run: |
+          $uri = "https://crates.io/api/v1/crates/cathub/$($env:VERSION)"
+          try {
+            Invoke-RestMethod -Uri $uri -Headers @{ 'User-Agent' = 'CatHub release workflow' } | Out-Null
+            Write-Host "cathub $($env:VERSION) is already published"
+          } catch {
+            if ($_.Exception.Response.StatusCode -ne 404) {
+              throw
+            }
+            cargo publish --locked -p cathub
+            if ($LASTEXITCODE -ne 0) {
+              throw "cargo publish failed for cathub"
+            }
+          }
+
+      - name: Publish CatHub.Protocol
+        shell: pwsh
+        run: |
+          dotnet nuget push "release/CatHub.Protocol.$($env:VERSION).nupkg" `
+            --source https://api.nuget.org/v3/index.json `
+            --api-key $env:NUGET_API_KEY `
+            --skip-duplicate
+          if ($LASTEXITCODE -ne 0) {
+            throw "dotnet nuget push failed for CatHub.Protocol"
+          }
+
+      - name: Verify registry packages
+        shell: pwsh
+        run: |
+          $crates = @('cathub-protocol', 'cathub')
+          foreach ($crate in $crates) {
+            $uri = "https://crates.io/api/v1/crates/$crate/$($env:VERSION)"
+            Invoke-RestMethod -Uri $uri -Headers @{ 'User-Agent' = 'CatHub release workflow' } | Out-Null
+          }
+
+          $nugetUri = "https://api.nuget.org/v3-flatcontainer/cathub.protocol/$($env:VERSION)/cathub.protocol.$($env:VERSION).nupkg"
+          $indexed = $false
+          foreach ($attempt in 1..60) {
+            try {
+              Invoke-WebRequest -Method Head -Uri $nugetUri | Out-Null
+              $indexed = $true
+              break
+            } catch {
+              Write-Host "Waiting for NuGet indexing ($attempt/60)"
+              Start-Sleep -Seconds 10
+            }
+          }
+          if (-not $indexed) {
+            throw "CatHub.Protocol $($env:VERSION) was not indexed within 10 minutes"
+          }

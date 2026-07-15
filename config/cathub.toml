@@ -29,9 +29,9 @@ native_push = true       # daemon enables and owns the TS-590 AI2; stream
 
 # --- WinKeyer broker ------------------------------------------------------------------
 #
-# CatHub owns the physical keyer. QsoRipper uses the typed loopback API; N1MM uses the
-# application side of a separate com0com pair. Change COM40/COM41 if that pair is not
-# installed on this station.
+# CatHub owns the physical keyer. Typed clients use the loopback API; legacy clients use
+# the application side of a dedicated virtual serial pair. Change COM40/COM41 if that pair
+# is not installed on this station.
 
 [winkeyer]
 port = "COM3"
@@ -57,9 +57,9 @@ perms = ["status", "control", "config_write"]
 
 # --- Hamlib NET (rigctld-compatible) TCP endpoints -------------------------------------
 
-# Read-only endpoint for the QsoRipper engine's RigctldProvider.
+# Read-only endpoint for logger and monitor clients.
 [[hamlib_net]]
-name = "engine"
+name = "logger-readonly"
 bind = "127.0.0.1:4532"
 perms = ["read"]
 
