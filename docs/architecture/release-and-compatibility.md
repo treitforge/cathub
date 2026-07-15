@@ -18,24 +18,23 @@ tag does not publish to crates.io or NuGet.
 ## Registry publication order
 
 Registry publication requires the release owner's credentials and must occur only after the
-tagged release passes CI:
+tagged release passes CI. Configure the `CARGO_REGISTRY_TOKEN` and `NUGET_API_KEY` Actions
+repository secrets, then dispatch the trusted publication workflow:
 
 ```powershell
-cargo publish -p cathub-protocol
-cargo search cathub-protocol --limit 1
-cargo publish -p cathub
-dotnet nuget push artifacts\release\CatHub.Protocol.<version>.nupkg `
-  --source https://api.nuget.org/v3/index.json `
-  --api-key $env:NUGET_API_KEY
+gh workflow run publish-registries.yml -f release_tag=v0.1.0
 ```
 
-Do not print either registry token. Verify package ownership, the expected version, and the
-tag before publishing. The daemon crate depends on the same version of `cathub-protocol`.
-Publish the protocol crate first, wait until the crates.io index exposes that version, and
-only then publish `cathub`.
+The workflow rejects a draft or prerelease, verifies every release asset checksum, and checks
+that the tagged Rust and NuGet versions match. It publishes `cathub-protocol`, waits until
+Cargo can resolve that exact version from the crates.io index, publishes `cathub`, and then
+publishes `CatHub.Protocol`. Finally, it verifies both crates through the crates.io API and
+waits for the NuGet package to become available. Existing versions are detected so a retry
+can safely continue after a partial registry failure.
 
-The current workflow does not perform registry publication. A release owner must run these
-commands or add separately authorized trusted-publishing jobs.
+Do not print either registry token. Verify package ownership, the expected version, and the
+tag before dispatching the workflow. The daemon crate depends on the same version of
+`cathub-protocol`.
 
 ## Wire compatibility
 
