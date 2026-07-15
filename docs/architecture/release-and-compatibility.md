@@ -25,7 +25,7 @@ set the `NUGET_USER` Actions repository variable to the policy owner's NuGet use
 dispatch the publication workflow:
 
 ```powershell
-gh workflow run publish-registries.yml -f release_tag=v0.1.0
+gh workflow run publish-registries.yml -f release_tag=v0.1.1
 ```
 
 The workflow rejects a draft or prerelease, verifies every release asset checksum, and checks
