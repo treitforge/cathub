@@ -829,7 +829,7 @@ perms = ["read"]
         assert!(!config.hamlib_net[0].permissions().write);
         assert_eq!(config.baseline_interval(), Duration::from_millis(200));
         assert_eq!(config.heartbeat_interval(), Duration::from_millis(2_500));
-        assert_eq!(config.ptt_max_tx(), Duration::from_millis(120_000));
+        assert_eq!(config.ptt_max_tx(), Duration::from_secs(120));
     }
 
     #[test]

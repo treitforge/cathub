@@ -102,7 +102,7 @@ mod tests {
     fn back_off_only_when_native_push_covers_field() {
         let state = StateHandle::new();
         let baseline = Duration::from_millis(200);
-        let heartbeat = Duration::from_millis(2_000);
+        let heartbeat = Duration::from_secs(2);
 
         // No coverage yet: baseline.
         assert_eq!(next_interval(&state, true, baseline, heartbeat), baseline);
@@ -138,7 +138,7 @@ mod tests {
         // because it only ever probed VFO A.
         let state = StateHandle::new();
         let baseline = Duration::from_millis(200);
-        let heartbeat = Duration::from_millis(2_000);
+        let heartbeat = Duration::from_secs(2);
 
         // Make VFO B the active receive VFO.
         state.record(
