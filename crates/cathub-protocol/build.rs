@@ -3,6 +3,9 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let compiler_path = protoc_bin_vendored::protoc_bin_path()?;
+    std::env::set_var("PROTOC", compiler_path);
+
     let proto_root = PathBuf::from("proto");
     println!("cargo::rerun-if-changed={}", proto_root.display());
     let service_root = proto_root.join("services");
