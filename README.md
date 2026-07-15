@@ -19,8 +19,17 @@ after shutdown or a failed client session.
 
 ## Install
 
-No public CatHub release has been tagged yet. Until the first release is published, build
-the daemon from this repository with Rust 1.88 or newer:
+Install the daemon from crates.io with Rust 1.88 or newer:
+
+```powershell
+cargo install cathub --version 0.1.1
+```
+
+Alternatively, download the Windows or Linux archive and adjacent SHA-256 checksum from the
+[GitHub Releases page](https://github.com/treitforge/cathub/releases). Extract the archive
+and place `cathub` or `cathub.exe` on `PATH`.
+
+To build the daemon from source:
 
 ```powershell
 git clone https://github.com/treitforge/cathub.git
@@ -28,14 +37,8 @@ Set-Location cathub
 cargo build --release -p cathub
 ```
 
-The executable is `target\release\cathub.exe` on Windows and
-`target/release/cathub` on Linux. Copy it to a directory on `PATH`, or run it by its full
-path.
-
-Tagged releases will provide Windows and Linux archives with adjacent SHA-256 checksum
-files on the [GitHub Releases page](https://github.com/treitforge/cathub/releases). After
-the daemon crate is published to crates.io, users with a Rust toolchain may instead run
-`cargo install cathub --version <version>`. A daemon operator does not need either
+The source-built executable is `target\release\cathub.exe` on Windows and
+`target/release/cathub` on Linux. A daemon operator does not need either
 protocol-development package described below.
 
 ## Build and test
@@ -128,10 +131,11 @@ client/server contract crate. `CatHub.Protocol` is the .NET client package proje
 protocol packages are for applications that use the typed WinKeyer API and are not required
 to run the daemon.
 
-The release workflow packages both protocol artifacts into a GitHub release. Publishing the
-daemon and protocol crates to crates.io, and the .NET contract to NuGet, are separate
-release-authority operations. None of those registry packages exists before publication
-succeeds. See
+The release workflow packages both protocol artifacts into a GitHub release. Published
+client packages are available as
+[`cathub-protocol`](https://crates.io/crates/cathub-protocol) for Rust and
+[`CatHub.Protocol`](https://www.nuget.org/packages/CatHub.Protocol) for .NET. Registry
+publication remains a separate release-authority operation. See
 [release and compatibility](docs/architecture/release-and-compatibility.md).
 
 ## Documentation

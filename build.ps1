@@ -22,6 +22,18 @@ function Invoke-DotNet {
     if ($LASTEXITCODE -ne 0) { throw "dotnet failed with exit code $LASTEXITCODE" }
 }
 
+function Test-CargoPackageReadmes {
+    foreach ($package in @('cathub-protocol', 'cathub')) {
+        $files = @(& cargo package --allow-dirty --list -p $package)
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo package --list failed for $package with exit code $LASTEXITCODE"
+        }
+        if ($files -notcontains 'README.md') {
+            throw "$package package does not contain README.md"
+        }
+    }
+}
+
 Push-Location $root
 try {
     switch ($Action) {
@@ -47,6 +59,7 @@ try {
             Invoke-Cargo -CargoArguments @('fmt', '--all', '--', '--check')
             Invoke-Cargo -CargoArguments @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings')
             Invoke-Cargo -CargoArguments @('test', '--workspace')
+            Test-CargoPackageReadmes
             & buf lint
             if ($LASTEXITCODE -ne 0) { throw "buf lint failed with exit code $LASTEXITCODE" }
             Invoke-DotNet -DotNetArguments @('build', 'CatHub.slnx', '-c', $Configuration)

@@ -11,14 +11,13 @@ Download the matching platform archive from the
 [GitHub Releases page](https://github.com/treitforge/cathub/releases), verify the adjacent
 SHA-256 checksum, extract it, and place `cathub` or `cathub.exe` on `PATH`.
 
-If the daemon crate has been published for that version and Rust is already installed, the
-equivalent installation is:
+If Rust 1.88 or newer is already installed, the equivalent installation from crates.io is:
 
 ```powershell
-cargo install cathub --version <version>
+cargo install cathub --version 0.1.1
 ```
 
-No public release has been tagged yet. Until the first release exists, build from source:
+To build from source instead:
 
 ```powershell
 git clone https://github.com/treitforge/cathub.git
