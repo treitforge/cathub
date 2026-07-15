@@ -381,7 +381,7 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     // instead of defaults. Best-effort and time-bounded: a slow or absent radio must not
     // block startup, since the baseline poller keeps retrying afterwards.
     match tokio::time::timeout(
-        Duration::from_millis(1_000),
+        Duration::from_secs(1),
         radio.submit(POLLER_SESSION, Priority::Poll, OpKind::Poll),
     )
     .await

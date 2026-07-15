@@ -23,7 +23,7 @@ use crate::model::{RadioEventSource, StateMutation};
 use crate::state::StateHandle;
 
 /// Default per-command reply timeout.
-const REPLY_TIMEOUT: Duration = Duration::from_millis(1_000);
+const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Priority class for scheduling across endpoints. Lower discriminant wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
