@@ -213,7 +213,7 @@ pub(crate) struct WinkeyerConfig {
     /// Broker-wide transmit safety ceiling.
     #[serde(default = "default_winkeyer_max_tx_ms")]
     pub(crate) max_tx_ms: u64,
-    /// Loopback gRPC endpoint used by QsoRipper engines.
+    /// Loopback gRPC endpoint used by typed WinKeyer clients.
     #[serde(default = "default_winkeyer_api_bind")]
     pub(crate) api_bind: String,
 }
@@ -271,8 +271,6 @@ pub(crate) struct Config {
 const UNIFIED_SECTION: &str = "cat_hub";
 /// Environment override for CatHub's standalone configuration path.
 const CONFIG_PATH_ENV: &str = "CATHUB_CONFIG_PATH";
-/// Legacy QsoRipper override retained for a compatibility transition.
-const LEGACY_CONFIG_PATH_ENV: &str = "QSORIPPER_CONFIG_PATH";
 /// Per-user standalone configuration directory.
 const CONFIG_DIR: &str = "cathub";
 /// Standalone configuration file name.
@@ -286,9 +284,9 @@ impl Config {
         Ok(config)
     }
 
-    /// Parse a configuration from a TOML document that may be either the unified
-    /// `config.toml` (daemon settings nested under `[cat_hub]`, alongside the engine's and
-    /// launcher's own sections) or a standalone cathub config (top-level `[radio]` ...).
+    /// Parse a configuration from a TOML document that may be either a managed
+    /// document (daemon settings nested under `[cat_hub]`) or a standalone CatHub
+    /// configuration (top-level `[radio]` ...).
     ///
     /// Detection is by presence of a top-level `cat_hub` table: when present, only that
     /// subtree is used and every other section is ignored; otherwise the whole document is
@@ -600,22 +598,15 @@ impl Config {
     /// The default standalone CatHub configuration path.
     ///
     /// 1. `CATHUB_CONFIG_PATH` if set,
-    /// 2. the legacy `QSORIPPER_CONFIG_PATH` only when it names an existing file,
-    /// 3. `%APPDATA%\cathub\cathub.toml` (Windows) or
+    /// 2. `%APPDATA%\cathub\cathub.toml` (Windows) or
     ///    `$XDG_CONFIG_HOME/cathub/cathub.toml` -> `$HOME/.config/cathub/cathub.toml` (Unix),
-    /// 4. a bare `cathub.toml` in the working directory as a last resort.
+    /// 3. a bare `cathub.toml` in the working directory as a last resort.
     ///
     /// Daemon settings live under the `[cat_hub]` table of that file (see
     /// [`Config::parse_document`]); a standalone `--config cathub.toml` is still accepted.
     pub(crate) fn default_config_path() -> PathBuf {
         if let Some(path) = std::env::var_os(CONFIG_PATH_ENV) {
             return PathBuf::from(path);
-        }
-        if let Some(path) = std::env::var_os(LEGACY_CONFIG_PATH_ENV) {
-            let path = PathBuf::from(path);
-            if path.is_file() {
-                return path;
-            }
         }
         #[cfg(target_os = "windows")]
         {
@@ -924,9 +915,7 @@ backend = "loopback"
     fn default_path_is_standalone_cathub_toml() {
         let path = Config::default_config_path();
         let text = path.to_string_lossy();
-        if std::env::var_os(CONFIG_PATH_ENV).is_none()
-            && std::env::var_os(LEGACY_CONFIG_PATH_ENV).is_none()
-        {
+        if std::env::var_os(CONFIG_PATH_ENV).is_none() {
             assert!(
                 text.ends_with(CONFIG_FILE),
                 "expected {CONFIG_FILE}, got {text}"

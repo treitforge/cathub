@@ -10,7 +10,8 @@ Run the complete local gate before opening a pull request:
 
 Changes to files under `crates\cathub-protocol\proto` are public wire-contract changes.
 Keep protobuf 1-1-1 structure, use unique request and response envelopes, run `buf lint`,
-and document compatibility. Do not rename the 0.1 `qsoripper.services` package in place.
+and document compatibility. The 0.1 `qsoripper.services` wire-package identifier is a
+compatibility boundary. Do not rename it in place or interpret it as a source dependency.
 
 Hardware transmission tests must be attended. Automated tests must not key a physical
 transmitter.

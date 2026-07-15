@@ -1,4 +1,4 @@
-//! Loopback gRPC surface for typed QsoRipper WinKeyer clients.
+//! Loopback gRPC surface for typed WinKeyer clients.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

@@ -2,8 +2,8 @@
 //! transcripts captured from a real `rigctld`, §10.1).
 //!
 //! This is a thin server-side reimplementation of the rigctld net protocol - it never
-//! links Hamlib (§8.8). It serves the QsoRipper engine (read-only endpoint) and WSJT-X
-//! (write/PTT endpoint). Modeled reads come from the universal state; writes go through
+//! links Hamlib (§8.8). It serves read-only and write/PTT client endpoints. Modeled reads
+//! come from the universal state; writes go through
 //! [`ClientSessionContext::apply_modeled`] so they participate in serialization, the PTT lease, and
 //! event fan-out. Set commands never emit a VFO-target write (frequency always lands on
 //! the active VFO), preserving the no-VFO-retargeting invariant.
