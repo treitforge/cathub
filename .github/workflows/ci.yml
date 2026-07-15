@@ -12,13 +12,15 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: bufbuild/buf-setup-action@v1
+      - uses: bufbuild/buf-action@v1.4.0
         with:
+          version: 1.50.0
           github_token: ${{ github.token }}
+          setup_only: true
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -27,8 +29,8 @@ jobs:
   dotnet-protocol:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-dotnet@v5.4.0
         with:
           dotnet-version: 10.0.x
       - run: dotnet build CatHub.slnx -c Release
