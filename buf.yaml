@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: crates/cathub-protocol/proto
+    name: buf.build/treitforge/cathub
+lint:
+  use:
+    - STANDARD
+  except:
+    - ENUM_ZERO_VALUE_SUFFIX
+    - PACKAGE_DIRECTORY_MATCH
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE

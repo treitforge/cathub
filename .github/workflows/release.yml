@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  daemon:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            rid: windows-x86_64
+            binary: cathub.exe
+          - os: ubuntu-latest
+            rid: linux-x86_64
+            binary: cathub
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p cathub
+      - name: Assemble release archive
+        shell: pwsh
+        run: |
+          $name = "cathub-${{ github.ref_name }}-${{ matrix.rid }}"
+          New-Item -ItemType Directory -Path "artifacts/release/$name" -Force | Out-Null
+          Copy-Item "target/release/${{ matrix.binary }}" "artifacts/release/$name/"
+          Copy-Item README.md, LICENSE "artifacts/release/$name/"
+          Copy-Item config "artifacts/release/$name/config" -Recurse
+          if ('${{ runner.os }}' -eq 'Windows') {
+            Compress-Archive -Path "artifacts/release/$name" -DestinationPath "artifacts/release/$name.zip"
+            $archive = "artifacts/release/$name.zip"
+          } else {
+            & tar -C artifacts/release -czf "artifacts/release/$name.tar.gz" $name
+            $archive = "artifacts/release/$name.tar.gz"
+          }
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([System.IO.Path]::GetFileName($archive))" |
+            Set-Content -LiteralPath "$archive.sha256" -NoNewline
+          Remove-Item -LiteralPath "artifacts/release/$name" -Recurse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cathub-${{ matrix.rid }}
+          path: artifacts/release/*
+
+  protocols:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: cargo package -p cathub-protocol
+      - run: dotnet pack src\dotnet\CatHub.Protocol\CatHub.Protocol.csproj -c Release -o artifacts\release
+      - name: Collect protocol packages and checksums
+        shell: pwsh
+        run: |
+          Copy-Item target\package\cathub-protocol-*.crate artifacts\release\
+          Get-ChildItem artifacts\release -File | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.FullName).sha256" -NoNewline
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cathub-protocols
+          path: artifacts/release/*
+
+  publish:
+    needs: [daemon, protocols]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release/*

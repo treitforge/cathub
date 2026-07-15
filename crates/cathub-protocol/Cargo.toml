@@ -1,0 +1,19 @@
+[package]
+name = "cathub-protocol"
+description = "Versioned gRPC contracts for CatHub clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost = { workspace = true }
+tonic = { workspace = true }
+
+[build-dependencies]
+protoc-bin-vendored = "3.2.0"
+tonic-build = "0.12"
+
+[lints]
+workspace = true
