@@ -1,6 +1,6 @@
-# qsoripper-cathub operator setup
+# cathub operator setup
 
-`qsoripper-cathub` is a single daemon that owns the radio's CAT serial port and fans it out
+`cathub` is a single daemon that owns the radio's CAT serial port and fans it out
 to every application over that application's native protocol. Because only the daemon talks
 to the radio, the classic multi-app failures disappear:
 
@@ -12,19 +12,19 @@ to the radio, the classic multi-app failures disappear:
 This runbook brings up the hub for six applications sharing one Kenwood TS-590:
 HDSDR (via OmniRig), QsoRipper TUI and GUI, ARCP-590, N1MM Logger+, WSJT-X, and Log4OM.
 
-See `docs/design/cathub-multi-client-cat-hub.md` for the architecture and behavior contracts.
+See `docs/design/multi-client-cat-hub.md` for the architecture and behavior contracts.
 
 ## 1. Retire the legacy chain
 
 The old stack was rigctld + a Python safe-bridge + rigctlcom. Stop all of it before starting
-the hub. Only one process may own the radio's COM port (COM4 on this station — the
+the hub. Only one process may own the radio's COM port (COM4 on this station - the
 Silicon Labs CP210x USB-UART bridge that fronts the TS-590's USB CAT port).
 
     Get-Process rigctld, rigctlcom -ErrorAction SilentlyContinue | Stop-Process
     # also stop any safe-bridge Python process and any app still bound directly to COM4
 
 Remove or disable any legacy startup hooks that relaunch `rigctld.exe`; otherwise it can
-reclaim the radio COM port after you stop QsoRipper/cathub. Check scheduled tasks first:
+reclaim the radio COM port after you stop CatHub. Check scheduled tasks first:
 
     Get-ScheduledTask -TaskName QsoRipper-rigctld -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName QsoRipper-rigctld -Confirm:$false
@@ -60,31 +60,35 @@ removed from the active configuration.
 
 ## 3. Configure the daemon
 
-The daemon settings live in the unified per-user `config.toml` shared with the engine and the
-launcher, under a `[cat_hub]` table:
+CatHub's authoritative settings live in its own `cathub.toml` file:
 
-- Windows: `%APPDATA%\qsoripper\config.toml`
-- Linux/macOS: `$XDG_CONFIG_HOME/qsoripper/config.toml` (or `~/.config/qsoripper/config.toml`)
-- Override the location for every component with the `QSORIPPER_CONFIG_PATH` environment variable.
+- Windows: `%APPDATA%\cathub\cathub.toml`
+- Linux/macOS: `$XDG_CONFIG_HOME/cathub/cathub.toml` (or `~/.config/cathub/cathub.toml`)
+- Override the location with `CATHUB_CONFIG_PATH` or `--config`.
 
-Settings nest under `[cat_hub]`, for example `[cat_hub.radio]`, `[cat_hub.poll]`,
-`[cat_hub.ptt]`, `[cat_hub.events]`, `[[cat_hub.serial_endpoint]]`, `[[cat_hub.hamlib_net]]`,
-`[cat_hub.winkeyer]`, and `[[cat_hub.winkeyer_endpoint]]`. The
-engine and launcher own other top-level tables in the same file (`[station_profile]`,
-`[launcher]`, `[rig_control]`, …); each component preserves the others' tables when it saves,
-so the file is safe to share.
+The standalone file uses top-level `[radio]`, `[poll]`, `[ptt]`, `[events]`,
+`[[serial_endpoint]]`, `[[hamlib_net]]`, `[winkeyer]`, and `[[winkeyer_endpoint]]` tables.
+The repository ships a complete example at `config\cathub.toml`. Validate it without
+touching hardware:
 
-For a standalone setup you can still keep a separate file (the repo ships
-`config\cathub.toml` with top-level `[radio]` … tables) and point the daemon at it with
-`-Config`. Validate either layout without touching hardware:
+    cargo run -p cathub -- config validate --config config\cathub.toml
+    cargo run -p cathub -- config print-effective --config config\cathub.toml
 
-    .\scripts\Start-CatHub.ps1 -DryRun
+CatHub also accepts an existing QsoRipper unified file with settings nested under `[cat_hub]`.
+Managed launchers should pass `--section cat_hub` to require that layout explicitly.
+To move that section into CatHub's standalone file without changing the source:
 
-When `-Config` is omitted the script uses the unified `config.toml` if it contains a
-`[cat_hub]` section, otherwise it falls back to the `config\cathub.toml` sample. The dry run
-prints the resolved radio, poll, PTT, events, endpoints, and Hamlib NET endpoints. Adjust COM port
-numbers and baud to match your com0com pairs and the TS-590's CAT baud, then re-run the dry run
-until it is clean.
+    cargo run -p cathub -- config migrate `
+      --from "$env:APPDATA\qsoripper\config.toml" `
+      --output "$env:APPDATA\cathub\cathub.toml"
+
+Add `--remove-source-section` only when you are ready to stop using managed compatibility
+mode. CatHub creates a `.bak` copy before changing the source file.
+
+To move in the other direction, copy the standalone tables beneath a new `[cat_hub]`
+namespace in QsoRipper's unified file, validate with `cathub --section cat_hub config
+validate --config <path>`, and only then point the managed launcher at that file. Preserve
+the standalone file until the managed launch has been verified.
 
 The `[radio].baud` value **must match the radio's own PC/CAT port speed** (TS-590 menu 62;
 e.g. 57600). If they differ, the daemon opens COM4 but cannot talk to the radio. The
@@ -105,24 +109,10 @@ Stop the hub with Ctrl+C in its window, or:
 
     .\scripts\Stop-CatHub.ps1
 
-### Cold-start workflow (build + launch everything)
-
-For a clean start after logon, build all artifacts and then launch the hub together with the
-engines and UIs from the launcher TUI:
-
-    .\build.ps1        # publishes qsoripper-cathub alongside the engines/UIs
-    .\launcher.ps1     # opens the launcher TUI
-
-In the launcher, the first column ("Services") lists the **CAT hub daemon (rigctld :4532)**
-above the engines. Check it with `Space`, then press `Enter`. The launcher starts the hub
-first, waits for its rigctld endpoint on `127.0.0.1:4532`, and only then starts the selected
-engines and UIs so everything connects to the hub. If the hub fails to come up the launcher
-aborts the rest of the launch; check `.\scripts\Get-CatHubLog.ps1 -Follow` for the cause. The
-hub reads the unified `config.toml` when it has a `[cat_hub]` table, otherwise the repo sample
-`config\cathub.toml`. Your selection (including the hub) is remembered for next time.
-
-`.\scripts\Start-CatHub.ps1` remains available as a manual, foreground helper for running the
-hub on its own (for example with `-DryRun` to validate config).
+Build and test CatHub independently with `.\build.ps1` and `.\test.ps1`. QsoRipper's launcher
+can also manage an installed CatHub binary through `CATHUB_EXECUTABLE`, `PATH`, or its optional
+bundled-artifact location. Managed mode may continue to pass QsoRipper's unified file while it
+contains a valid `[cat_hub]` table.
 
 ## 5. Point each application at the hub
 
@@ -180,7 +170,7 @@ hub on its own (for example with `-DryRun` to validate config).
   (`RPRT -11`); "Fake It" QSYs the single VFO at TX time and works correctly on either VFO.
   If you genuinely need real `Rig` split, point WSJT-X at a non-virtualized endpoint instead.
 - **PTT:** WSJT-X keys with Hamlib `RIG_PTT_ON_DATA` (`T 3`). The hub maps the Hamlib PTT
-  family faithfully to the TS-590 — `T 1` -> `TX;`, `T 2` (mic) -> `TX0;`, `T 3` (data) ->
+  family faithfully to the TS-590 - `T 1` -> `TX;`, `T 2` (mic) -> `TX0;`, `T 3` (data) ->
   `TX1;`, `T 0` -> `RX;`. `TX1;` keys with modulation from the DATA/USB audio path, which is
   what digital modes want.
 - Frequencies are sent by Hamlib as a `%f` value (e.g. `14074000.000000`); the hub
@@ -200,7 +190,7 @@ hub on its own (for example with `-DryRun` to validate config).
 Earlier builds made the TS-590 emit a short Morse **"U"** (di-di-dah) tone during WSJT-X
 operation, most noticeably when switching between modes that share a radio mode (for example
 FT8 and WSPR, which are both DATA-USB). The TS-590 beeps on **every** mode (`MD`) command it
-receives over CAT — frequency sets are silent. WSJT-X re-asserts its mode on every poll and on
+receives over CAT - frequency sets are silent. WSJT-X re-asserts its mode on every poll and on
 each FT8/WSPR switch, and the hub forwarded each `MD` set to the radio even when the value was
 unchanged, so the radio chirped. A native Hamlib driver never beeps because it caches state and
 sends a mode command only when the mode actually changes.
@@ -208,11 +198,11 @@ sends a mode command only when the mode actually changes.
 The hub now does the same: a modeled write (frequency, mode, DATA sub-mode, split, RIT/XIT)
 is sent to the radio only when it would change the radio. Mode comparison uses the **value
 written to the radio** (the `MD` digit), and the DATA flag (`DA`) is deduped independently, so
-switching between two modes that share the same wire state — for example FT8 and WSPR, which
-are both `PKTUSB` (`MD2`+`DA1`) — is recognized as a no-op and suppressed after the first set.
+switching between two modes that share the same wire state - for example FT8 and WSPR, which
+are both `PKTUSB` (`MD2`+`DA1`) - is recognized as a no-op and suppressed after the first set.
 A genuine mode change (for example switching to CW, or toggling DATA on/off) still sends one
 command and the radio beeps once, which matches native Hamlib behavior. PTT is never
-suppressed — keying and unkeying always reach the radio.
+suppressed - keying and unkeying always reach the radio.
 
 No radio-menu change is needed. Leave **Beep Volume** at your normal setting.
 
@@ -223,7 +213,7 @@ No radio-menu change is needed. Leave **Beep Volume** at your normal setting.
   `;V ?` (list supported VFOs) and then polls with `+\get_vfo_info VFOA` (~2 Hz). The hub's
   `hamlib_net` endpoint parses the ERP separator prefix (`+ ; | ,`) and answers both shapes in the
   exact byte format real `rigctld` produces, so Log4OM connects and stays **online**. Plain
-  clients (WSJT-X, N1MM, the engine) are unaffected — they never send the ERP prefix.
+  clients (WSJT-X, N1MM, the engine) are unaffected - they never send the ERP prefix.
 - **`single_vfo = true` makes Log4OM log the live frequency on either VFO.** Because Log4OM
   polls the fixed VFO `VFOA`, without virtualization it would read the *inactive* VFO A's
   stale frequency whenever the operator works on VFO B. With `single_vfo = true` the endpoint
@@ -288,12 +278,12 @@ transmitter from automation. Watch `Get-CatHubLog.ps1 -Follow` throughout.
   the app, and that the hub log shows the endpoint listening.
 - An app that relies on Kenwood auto-information (notably **ARCP-590**) connects but never
   tracks the dial / shows "BUSY": such apps poll `AI;` as a keepalive and depend entirely on
-  the radio pushing `FA;`/`IF;` frames. The hub virtualizes auto-info per connection — an `AI;`
+  the radio pushing `FA;`/`IF;` frames. The hub virtualizes auto-info per connection - an `AI;`
   read reports the endpoint's current state (`AI0;`/`AI2;`) without disabling it, and the hub fans
   out native-push frames to any endpoint that has enabled `AI2;`. This works in current builds; if
   an older build froze ARCP-590 on connect, update the daemon.
 - Set `CATHUB_LOG=debug` before starting for verbose tracing. Use
-  `CATHUB_LOG=qsoripper_cathub::serial_endpoint=trace` to see each endpoint's request/reply/notify
+  `CATHUB_LOG=cathub::serial_endpoint=trace` to see each endpoint's request/reply/notify
   frames, which is the fastest way to diagnose a client handshake.
 
 ## 8. Known v1 limitations
@@ -301,7 +291,7 @@ transmitter from automation. Watch `Get-CatHubLog.ps1 -Follow` throughout.
 - **Automatic radio reconnect.** If the radio transport drops mid-session (USB unplugged,
   radio powered off, cable hiccup, or a write error), the daemon now reopens the serial/TCP
   link automatically with capped exponential backoff (0.5 s up to 5 s) and resumes serving the
-  same client command queue — you no longer need to restart the hub. On each reconnect it also
+  same client command queue - you no longer need to restart the hub. On each reconnect it also
   re-arms the radio's native push (auto-info) state, which a power-cycled radio forgets (design
   §8.4/§8.7). Client endpoints and NET endpoints stay up throughout. Note: clients that hold their
   own CAT session above the hub (e.g. HDSDR via OmniRig) may still need their own

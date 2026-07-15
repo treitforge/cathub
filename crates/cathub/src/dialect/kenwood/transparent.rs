@@ -4,7 +4,7 @@
 //! modeled cache, a transparent endpoint behaves as if it were wired directly to the rig: every
 //! request except PTT and auto-information is forwarded to the radio verbatim, and the
 //! radio's entire CAT stream is relayed back verbatim. The rig runs in AI2, so it echoes
-//! every change any client makes through the hub — which is exactly what keeps a transparent
+//! every change any client makes through the hub - which is exactly what keeps a transparent
 //! controller perfectly in sync. This removes the whole class of synthesis/drift bugs (stale
 //! A/B, frozen frequency) for a client that already speaks the radio's exact protocol.
 //!

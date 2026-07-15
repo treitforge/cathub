@@ -1,20 +1,21 @@
-//! qsoripper-cathub: a multi-client CAT hub daemon.
+//! CatHub: a multi-client CAT and WinKeyer hub daemon.
 //!
 //! The daemon is the single owner of the radio link and fans it out to many client endpoints
 //! (HDSDR/OmniRig, N1MM Logger+, ARCP-590, WSJT-X, Log4OM, and the QsoRipper engine) over
 //! their native protocols. It serializes every write, owns the radio's native push stream,
 //! serves reads from a universal cache, arbitrates PTT with a single-owner lease, and never
-//! retargets a VFO during polling — eliminating the A/B oscillation, frequency drift, and
+//! retargets a VFO during polling - eliminating the A/B oscillation, frequency drift, and
 //! transmit conflicts that come from many apps fighting over one serial port.
 //!
-//! See `docs/design/cathub-multi-client-cat-hub.md` for the full design.
+//! See `docs/design/multi-client-cat-hub.md` for the full design.
 
 #![allow(clippy::doc_markdown)]
 
 /// Generated protobuf and gRPC bindings for the loopback WinKeyer broker API.
 #[allow(missing_docs, unreachable_pub, clippy::all, clippy::pedantic)]
+/// Public WinKeyer broker protocol types.
 pub mod broker_proto {
-    tonic::include_proto!("qsoripper.services");
+    pub use cathub_protocol::*;
 }
 
 mod backend;
@@ -40,7 +41,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 use tokio::net::TcpStream;
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -48,7 +49,7 @@ use crate::backend::kenwood::ts590::Ts590Backend;
 use crate::backend::loopback::LoopbackBackend;
 use crate::backend::rigctld::RigctldBackend;
 use crate::backend::{BackendError, RadioBackend};
-use crate::config::{Config, RadioConfig};
+use crate::config::{migrate_to_standalone, Config, RadioConfig};
 use crate::dialect::kenwood::transparent::TransparentTs590Dialect;
 use crate::dialect::kenwood::ts2000::Ts2000Dialect;
 use crate::dialect::kenwood::ts590::Ts590Dialect;
@@ -90,19 +91,78 @@ pub fn validate_cat_hub_toml(text: &str) -> Result<(), CatHubError> {
 /// Command-line arguments.
 #[derive(Debug, Parser)]
 #[command(
-    name = "qsoripper-cathub",
-    about = "Multi-client CAT hub daemon for sharing one radio across many applications"
+    name = "cathub",
+    version,
+    about = "Share one radio and WinKeyer safely across multiple applications"
 )]
 pub struct Cli {
     /// Path to the configuration file (defaults to the platform config path).
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub config: Option<PathBuf>,
+    /// Explicit top-level section to read from a managed configuration file.
+    #[arg(long, global = true)]
+    pub section: Option<String>,
     /// Optional explicit log file path (informational; logging also writes a rolling file).
     #[arg(long)]
     pub log: Option<PathBuf>,
     /// Load and validate the configuration, print it, and exit without touching hardware.
     #[arg(long)]
     pub dry_run: bool,
+    /// Standalone configuration operations.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Top-level CatHub commands.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Inspect, validate, or migrate CatHub configuration.
+    Config {
+        /// Configuration operation to perform.
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+/// CatHub configuration commands.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Validate a standalone or embedded `[cat_hub]` configuration.
+    Validate {
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Print the validated effective configuration in standalone form.
+    PrintEffective {
+        /// Select TOML text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Extract `[cat_hub]` from a unified file into a standalone file.
+    Migrate {
+        /// Unified QsoRipper configuration containing `[cat_hub]`.
+        #[arg(long)]
+        from: PathBuf,
+        /// Destination standalone CatHub TOML file.
+        #[arg(long)]
+        output: PathBuf,
+        /// Replace an existing destination after preserving a `.bak` copy.
+        #[arg(long)]
+        force: bool,
+        /// Remove `[cat_hub]` from the source after creating a `.bak` copy.
+        #[arg(long)]
+        remove_source_section: bool,
+    },
+}
+
+/// Output encoding for configuration diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable text or TOML.
+    Text,
+    /// Machine-readable JSON.
+    Json,
 }
 
 /// Initialize tracing for the process. The returned guard must be kept alive for the
@@ -180,6 +240,10 @@ async fn open_radio_tcp(radio: &RadioConfig) -> std::io::Result<TcpStream> {
 /// opened, or the process fails to install its Ctrl+C handler.
 #[allow(clippy::too_many_lines)] // The wiring is one cohesive bring-up sequence.
 pub async fn run(cli: Cli) -> Result<(), CatHubError> {
+    if let Some(command) = cli.command {
+        return run_command(command, cli.config, cli.section.as_deref())
+            .map_err(CatHubError::Config);
+    }
     let path = cli
         .config
         .clone()
@@ -187,7 +251,7 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     if let Some(log) = &cli.log {
         tracing::debug!(log = %log.display(), "log path override requested");
     }
-    let cfg = Config::load(&path)?;
+    let cfg = Config::load_selected(&path, cli.section.as_deref())?;
 
     if cli.dry_run {
         println!("{}", cfg.describe());
@@ -461,6 +525,70 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     Ok(())
 }
 
+fn run_command(
+    command: Command,
+    config_path: Option<PathBuf>,
+    section: Option<&str>,
+) -> Result<(), error::ConfigError> {
+    match command {
+        Command::Config { command } => match command {
+            ConfigCommand::Validate { format } => {
+                let path = config_path.unwrap_or_else(Config::default_config_path);
+                match Config::load_selected(&path, section) {
+                    Ok(_) => {
+                        match format {
+                            OutputFormat::Text => println!("valid: {}", path.display()),
+                            OutputFormat::Json => {
+                                println!("{}", serde_json::json!({ "valid": true, "path": path }));
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(error) => {
+                        if format == OutputFormat::Json {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "valid": false,
+                                    "path": path,
+                                    "error": error.to_string()
+                                })
+                            );
+                        }
+                        Err(error)
+                    }
+                }
+            }
+            ConfigCommand::PrintEffective { format } => {
+                let path = config_path.unwrap_or_else(Config::default_config_path);
+                let config = Config::load_selected(&path, section)?;
+                match format {
+                    OutputFormat::Text => print!("{}", config.to_standalone_toml()?),
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&config).map_err(|error| {
+                            error::ConfigError::Invalid(format!(
+                                "serializing configuration as JSON: {error}"
+                            ))
+                        })?
+                    ),
+                }
+                Ok(())
+            }
+            ConfigCommand::Migrate {
+                from,
+                output,
+                force,
+                remove_source_section,
+            } => {
+                migrate_to_standalone(&from, &output, force, remove_source_section)?;
+                println!("migrated: {} -> {}", from.display(), output.display());
+                Ok(())
+            }
+        },
+    }
+}
+
 /// Open the physical WinKeyer using the protocol-mandated 8-N-2 framing.
 fn open_winkeyer_serial(port_name: &str, baud: u32) -> std::io::Result<serial2_tokio::SerialPort> {
     serial2_tokio::SerialPort::open(port_name, move |mut settings: serial2_tokio::Settings| {
@@ -531,8 +659,10 @@ mod tests {
         .expect("write");
         let cli = Cli {
             config: Some(path.clone()),
+            section: None,
             log: None,
             dry_run: true,
+            command: None,
         };
         assert!(run(cli).await.is_ok());
         let _ = std::fs::remove_file(&path);
@@ -542,8 +672,10 @@ mod tests {
     async fn run_fails_on_missing_config() {
         let cli = Cli {
             config: Some(PathBuf::from("does-not-exist-cathub.toml")),
+            section: None,
             log: None,
             dry_run: true,
+            command: None,
         };
         assert!(run(cli).await.is_err());
     }
@@ -574,8 +706,10 @@ mod tests {
         .expect("write");
         let cli = Cli {
             config: Some(path.clone()),
+            section: None,
             log: None,
             dry_run: false,
+            command: None,
         };
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), run(cli)).await;
         let _ = std::fs::remove_file(&path);

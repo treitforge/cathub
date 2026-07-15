@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 use crate::permissions::EndpointPermissions;
@@ -51,7 +51,7 @@ fn default_winkeyer_api_bind() -> String {
 }
 
 /// The `[radio]` section.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct RadioConfig {
     /// Backend selector: `ts590`, `rigctld`, or `loopback`.
     pub(crate) backend: String,
@@ -82,7 +82,7 @@ pub(crate) struct RadioConfig {
 }
 
 /// The `[poll]` section.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct PollConfig {
     /// Baseline poll interval in milliseconds.
     #[serde(default = "default_baseline_ms")]
@@ -102,7 +102,7 @@ impl Default for PollConfig {
 }
 
 /// The `[ptt]` section.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct PttConfig {
     /// Maximum continuous transmit time in milliseconds (safety ceiling).
     #[serde(default = "default_max_tx_ms")]
@@ -118,7 +118,7 @@ impl Default for PttConfig {
 }
 
 /// The `[events]` section.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct EventsConfig {
     /// Whether to enable the radio's native push stream.
     #[serde(default = "default_native_push")]
@@ -134,7 +134,7 @@ impl Default for EventsConfig {
 }
 
 /// A `[[serial_endpoint]]` (serial client) endpoint.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct SerialEndpointConfig {
     /// A label for logging.
     pub(crate) name: String,
@@ -171,7 +171,7 @@ impl SerialEndpointConfig {
 }
 
 /// A `[[hamlib_net]]` (rigctld-compatible TCP) endpoint.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct HamlibNetConfig {
     /// A label for logging.
     pub(crate) name: String,
@@ -203,7 +203,7 @@ impl HamlibNetConfig {
 }
 
 /// The optional `[winkeyer]` physical-keyer broker section.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct WinkeyerConfig {
     /// Physical WinKeyer serial port exclusively owned by CatHub.
     pub(crate) port: String,
@@ -219,7 +219,7 @@ pub(crate) struct WinkeyerConfig {
 }
 
 /// One virtual WinKeyer serial endpoint backed by a com0com/PTY pair.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct WinkeyerEndpointConfig {
     /// Stable endpoint name used in logs and ownership status.
     pub(crate) name: String,
@@ -240,7 +240,7 @@ pub(crate) struct WinkeyerEndpointConfig {
 }
 
 /// The full daemon configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Config {
     /// The radio backend section.
     pub(crate) radio: RadioConfig,
@@ -269,15 +269,17 @@ pub(crate) struct Config {
 
 /// The table key the daemon's settings live under inside the shared unified `config.toml`.
 const UNIFIED_SECTION: &str = "cat_hub";
-/// Environment override for the shared config path (shared with the engine and launcher).
-const CONFIG_PATH_ENV: &str = "QSORIPPER_CONFIG_PATH";
-/// Per-user config directory name shared across QsoRipper components.
-const SHARED_DIR: &str = "qsoripper";
-/// Shared unified config file name.
-const SHARED_FILE: &str = "config.toml";
+/// Environment override for CatHub's standalone configuration path.
+const CONFIG_PATH_ENV: &str = "CATHUB_CONFIG_PATH";
+/// Legacy QsoRipper override retained for a compatibility transition.
+const LEGACY_CONFIG_PATH_ENV: &str = "QSORIPPER_CONFIG_PATH";
+/// Per-user standalone configuration directory.
+const CONFIG_DIR: &str = "cathub";
+/// Standalone configuration file name.
+const CONFIG_FILE: &str = "cathub.toml";
 
 impl Config {
-    /// Parse a configuration from a bare TOML string (top-level `[radio]` … layout).
+    /// Parse a configuration from a bare TOML string (top-level `[radio]` ... layout).
     pub(crate) fn parse(text: &str) -> Result<Config, ConfigError> {
         let config: Config = toml::from_str(text)?;
         config.validate()?;
@@ -286,7 +288,7 @@ impl Config {
 
     /// Parse a configuration from a TOML document that may be either the unified
     /// `config.toml` (daemon settings nested under `[cat_hub]`, alongside the engine's and
-    /// launcher's own sections) or a standalone cathub config (top-level `[radio]` …).
+    /// launcher's own sections) or a standalone cathub config (top-level `[radio]` ...).
     ///
     /// Detection is by presence of a top-level `cat_hub` table: when present, only that
     /// subtree is used and every other section is ignored; otherwise the whole document is
@@ -302,11 +304,39 @@ impl Config {
         }
     }
 
-    /// Load and parse a configuration from a file, accepting either the unified or the
-    /// standalone layout (see [`Config::parse_document`]).
-    pub(crate) fn load(path: &std::path::Path) -> Result<Config, ConfigError> {
+    /// Parse a specifically selected top-level configuration section.
+    pub(crate) fn parse_section(text: &str, section_name: &str) -> Result<Config, ConfigError> {
+        if section_name != UNIFIED_SECTION {
+            return Err(ConfigError::Invalid(format!(
+                "unsupported configuration section '{section_name}' (expected '{UNIFIED_SECTION}')"
+            )));
+        }
+        let document: toml::Value = toml::from_str(text)?;
+        let section = document.get(section_name).ok_or_else(|| {
+            ConfigError::Invalid(format!(
+                "configuration does not contain a top-level [{section_name}] section"
+            ))
+        })?;
+        let config: Config = section.clone().try_into()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load a configuration using an optional explicit top-level section selector.
+    pub(crate) fn load_selected(
+        path: &std::path::Path,
+        section_name: Option<&str>,
+    ) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path)?;
-        Config::parse_document(&text)
+        section_name.map_or_else(
+            || Config::parse_document(&text),
+            |section| Config::parse_section(&text, section),
+        )
+    }
+
+    /// Serialize the validated effective configuration using the standalone layout.
+    pub(crate) fn to_standalone_toml(&self) -> Result<String, ConfigError> {
+        Ok(toml::to_string_pretty(self)?)
     }
 
     /// Validate semantic constraints not captured by the type system.
@@ -567,13 +597,13 @@ impl Config {
         }
     }
 
-    /// The default config path: the per-user unified `config.toml` shared with the engine and
-    /// launcher. Resolution mirrors the engine and launcher:
+    /// The default standalone CatHub configuration path.
     ///
-    /// 1. `QSORIPPER_CONFIG_PATH` if set,
-    /// 2. `%APPDATA%\qsoripper\config.toml` (Windows) or
-    ///    `$XDG_CONFIG_HOME/qsoripper/config.toml` → `$HOME/.config/qsoripper/config.toml` (Unix),
-    /// 3. a bare `config.toml` in the working directory as a last resort.
+    /// 1. `CATHUB_CONFIG_PATH` if set,
+    /// 2. the legacy `QSORIPPER_CONFIG_PATH` only when it names an existing file,
+    /// 3. `%APPDATA%\cathub\cathub.toml` (Windows) or
+    ///    `$XDG_CONFIG_HOME/cathub/cathub.toml` -> `$HOME/.config/cathub/cathub.toml` (Unix),
+    /// 4. a bare `cathub.toml` in the working directory as a last resort.
     ///
     /// Daemon settings live under the `[cat_hub]` table of that file (see
     /// [`Config::parse_document`]); a standalone `--config cathub.toml` is still accepted.
@@ -581,26 +611,108 @@ impl Config {
         if let Some(path) = std::env::var_os(CONFIG_PATH_ENV) {
             return PathBuf::from(path);
         }
+        if let Some(path) = std::env::var_os(LEGACY_CONFIG_PATH_ENV) {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                return path;
+            }
+        }
         #[cfg(target_os = "windows")]
         {
             if let Some(app_data) = std::env::var_os("APPDATA") {
-                return PathBuf::from(app_data).join(SHARED_DIR).join(SHARED_FILE);
+                return PathBuf::from(app_data).join(CONFIG_DIR).join(CONFIG_FILE);
             }
         }
         #[cfg(not(target_os = "windows"))]
         {
             if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-                return PathBuf::from(xdg).join(SHARED_DIR).join(SHARED_FILE);
+                return PathBuf::from(xdg).join(CONFIG_DIR).join(CONFIG_FILE);
             }
             if let Some(home) = std::env::var_os("HOME") {
                 return PathBuf::from(home)
                     .join(".config")
-                    .join(SHARED_DIR)
-                    .join(SHARED_FILE);
+                    .join(CONFIG_DIR)
+                    .join(CONFIG_FILE);
             }
         }
-        PathBuf::from(SHARED_FILE)
+        PathBuf::from(CONFIG_FILE)
     }
+}
+
+/// Extract a unified `[cat_hub]` section into a standalone CatHub file.
+pub(crate) fn migrate_to_standalone(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    force: bool,
+    remove_source_section: bool,
+) -> Result<(), ConfigError> {
+    let source_text = std::fs::read_to_string(source)?;
+    let config = Config::parse_document(&source_text)?;
+    let document: toml::Value = toml::from_str(&source_text)?;
+    if document.get(UNIFIED_SECTION).is_none() {
+        return Err(ConfigError::Invalid(
+            "migration source does not contain a top-level [cat_hub] section".to_string(),
+        ));
+    }
+    if destination.exists() && !force {
+        return Err(ConfigError::Invalid(format!(
+            "migration destination already exists: {}",
+            destination.display()
+        )));
+    }
+    if remove_source_section && backup_path(source).exists() {
+        return Err(ConfigError::Invalid(format!(
+            "source backup already exists: {}",
+            backup_path(source).display()
+        )));
+    }
+
+    let standalone = config.to_standalone_toml()?;
+    atomic_write(destination, standalone.as_bytes(), force)?;
+
+    if remove_source_section {
+        let mut editable = source_text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| ConfigError::Invalid(format!("editing migration source: {error}")))?;
+        editable.remove(UNIFIED_SECTION);
+        let backup = backup_path(source);
+        std::fs::copy(source, &backup)?;
+        atomic_write(source, editable.to_string().as_bytes(), true)?;
+    }
+    Ok(())
+}
+
+fn atomic_write(path: &std::path::Path, contents: &[u8], replace: bool) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("toml")
+    ));
+    std::fs::write(&temporary, contents)?;
+    if replace && path.exists() {
+        let backup = backup_path(path);
+        if !backup.exists() {
+            std::fs::copy(path, backup)?;
+        }
+        std::fs::remove_file(path)?;
+    }
+    match std::fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(ConfigError::Io(error))
+        }
+    }
+}
+
+fn backup_path(path: &std::path::Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".bak");
+    PathBuf::from(value)
 }
 
 fn validate_winkeyer_endpoint(endpoint: &WinkeyerEndpointConfig) -> Result<(), ConfigError> {
@@ -809,23 +921,65 @@ backend = "loopback"
     }
 
     #[test]
-    fn default_path_is_unified_config_toml() {
-        // With no env override, the default resolves to the shared unified file name and lives
-        // under the shared per-user directory rather than a standalone cathub.toml.
+    fn default_path_is_standalone_cathub_toml() {
         let path = Config::default_config_path();
         let text = path.to_string_lossy();
-        assert!(
-            text.ends_with("config.toml"),
-            "expected config.toml, got {text}"
-        );
-        // The bare last-resort fallback is the only case without the shared dir; on dev/CI
-        // machines APPDATA/HOME are set, so the shared dir should be present.
-        if std::env::var_os(CONFIG_PATH_ENV).is_none() {
+        if std::env::var_os(CONFIG_PATH_ENV).is_none()
+            && std::env::var_os(LEGACY_CONFIG_PATH_ENV).is_none()
+        {
             assert!(
-                text.contains(SHARED_DIR) || text == SHARED_FILE,
-                "expected shared dir or bare fallback, got {text}"
+                text.ends_with(CONFIG_FILE),
+                "expected {CONFIG_FILE}, got {text}"
+            );
+            assert!(
+                text.contains(CONFIG_DIR) || text == CONFIG_FILE,
+                "expected CatHub config dir or bare fallback, got {text}"
             );
         }
+    }
+
+    #[test]
+    fn migration_extracts_unified_section_without_modifying_source() {
+        let root = std::env::temp_dir().join(format!("cathub-migrate-{}", std::process::id()));
+        let source = root.join("config.toml");
+        let destination = root.join("cathub.toml");
+        let _ = std::fs::create_dir_all(&root);
+        let original = "[launcher]\nselected = [\"rust-engine\"]\n\n[cat_hub.radio]\nbackend = \"loopback\"\n\n[[cat_hub.hamlib_net]]\nname = \"engine\"\nbind = \"127.0.0.1:4532\"\nperms = [\"read\"]\n";
+        std::fs::write(&source, original).expect("write source");
+
+        migrate_to_standalone(&source, &destination, false, false).expect("migrate");
+
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("read source"),
+            original
+        );
+        let migrated = std::fs::read_to_string(&destination).expect("read destination");
+        let config = Config::parse(&migrated).expect("parse migrated");
+        assert_eq!(config.radio.backend, "loopback");
+        assert_eq!(config.hamlib_net.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_refuses_to_overwrite_destination() {
+        let root =
+            std::env::temp_dir().join(format!("cathub-migrate-existing-{}", std::process::id()));
+        let source = root.join("config.toml");
+        let destination = root.join("cathub.toml");
+        let _ = std::fs::create_dir_all(&root);
+        std::fs::write(
+            &source,
+            "[cat_hub.radio]\nbackend = \"loopback\"\n[[cat_hub.hamlib_net]]\nname = \"engine\"\nbind = \"127.0.0.1:4532\"\n",
+        )
+        .expect("write source");
+        std::fs::write(&destination, "keep").expect("write destination");
+
+        assert!(migrate_to_standalone(&source, &destination, false, false).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read destination"),
+            "keep"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -876,6 +1030,15 @@ perms = ["read"]
         assert_eq!(config.radio.backend, "ts590");
         assert_eq!(config.radio.port, "COM3");
         assert_eq!(config.serial_endpoint.len(), 1);
+    }
+
+    #[test]
+    fn explicit_section_requires_and_parses_cat_hub() {
+        let embedded = "[cat_hub.radio]\nbackend = \"loopback\"\n\
+                        [[cat_hub.hamlib_net]]\nname = \"engine\"\nbind = \"127.0.0.1:4532\"\n";
+        assert!(Config::parse_section(embedded, "cat_hub").is_ok());
+        assert!(Config::parse_section(SAMPLE, "cat_hub").is_err());
+        assert!(Config::parse_section(embedded, "other").is_err());
     }
 
     #[test]

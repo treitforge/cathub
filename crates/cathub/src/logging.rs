@@ -9,22 +9,28 @@ use tracing_subscriber::EnvFilter;
 
 /// The default log directory for this platform.
 fn log_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("CATHUB_LOG_DIR") {
+        return PathBuf::from(path);
+    }
     #[cfg(target_os = "windows")]
     {
-        if let Ok(profile) = std::env::var("USERPROFILE") {
-            return PathBuf::from(profile);
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data).join("cathub").join("logs");
+        }
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            return PathBuf::from(app_data).join("cathub").join("logs");
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
         if let Ok(state) = std::env::var("XDG_STATE_HOME") {
-            return PathBuf::from(state).join("qsoripper");
+            return PathBuf::from(state).join("cathub");
         }
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home)
                 .join(".local")
                 .join("state")
-                .join("qsoripper");
+                .join("cathub");
         }
     }
     PathBuf::from(".")
@@ -35,7 +41,7 @@ fn log_dir() -> PathBuf {
 pub(crate) fn init() -> WorkerGuard {
     let dir = log_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let file_appender = tracing_appender::rolling::daily(&dir, "qsoripper-cathub.log");
+    let file_appender = tracing_appender::rolling::daily(&dir, "cathub.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let filter = EnvFilter::try_from_env("CATHUB_LOG").unwrap_or_else(|_| EnvFilter::new("info"));

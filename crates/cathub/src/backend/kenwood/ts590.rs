@@ -1,7 +1,7 @@
 //! The first-class native TS-590 backend.
 //!
 //! It speaks Kenwood `;`-terminated ASCII CAT directly and is the certified-native path.
-//! Crucially, its poll command set contains **no `FR`/`FT` VFO-select commands** — polling
+//! Crucially, its poll command set contains **no `FR`/`FT` VFO-select commands** - polling
 //! never retargets a VFO, which is the root-cause fix for the A/B oscillation seen when a
 //! status poll toggled the receive VFO (design §8.8). Sets are fire-and-forget (Kenwood
 //! radios do not acknowledge a set), and the radio's auto-information stream (`AI2;`) drives

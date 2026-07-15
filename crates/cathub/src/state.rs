@@ -116,8 +116,8 @@ impl Snapshot {
     /// The hub forwards a modeled write to the wire only when it would actually change the
     /// radio. Re-sending a value the radio already holds is not just wasted I/O: on the
     /// TS-590 every redundant `MD`/`FA` set makes the radio emit its PC-control beep (a
-    /// Morse "U"), which is why clients like WSJT-X — that re-assert mode/frequency on every
-    /// poll — chirp the radio through the hub but not through a native Hamlib driver, which
+    /// Morse "U"), which is why clients like WSJT-X - that re-assert mode/frequency on every
+    /// poll - chirp the radio through the hub but not through a native Hamlib driver, which
     /// caches state and never re-sends an unchanged value. Suppressing the no-op keeps the
     /// hub as quiet on the wire as the native driver. PTT is never redundant: keying and
     /// unkeying must always reach the radio and participate in the single-owner lease.
@@ -211,7 +211,7 @@ impl Snapshot {
 /// An ordered radio-output event delivered to endpoints for auto-information fan-out.
 ///
 /// Both modeled changes and unmodeled native frames travel on the **same** broadcast so
-/// endpoints observe them in the order the radio produced them — important for native
+/// endpoints observe them in the order the radio produced them - important for native
 /// pass-through clients that consume the CAT stream directly.
 #[derive(Debug, Clone)]
 pub(crate) enum RadioEvent {
@@ -222,8 +222,8 @@ pub(crate) enum RadioEvent {
     /// ARCP-590's NB on/NB1/NB2/off cycle) and front-panel changes stay in sync.
     Raw(Arc<[u8]>),
     /// A native frame the backend *did* model, forwarded verbatim for transparent mirror
-    /// endpoints (ARCP-590). Virtualizing endpoints ignore it — they consume the coalesced
-    /// [`RadioEvent::Change`] instead — but a transparent endpoint relays it so it tracks the
+    /// endpoints (ARCP-590). Virtualizing endpoints ignore it - they consume the coalesced
+    /// [`RadioEvent::Change`] instead - but a transparent endpoint relays it so it tracks the
     /// radio's real CAT stream rather than a synthesis, eliminating push/snapshot drift.
     RawNative(Arc<[u8]>),
 }

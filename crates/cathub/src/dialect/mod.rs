@@ -210,7 +210,7 @@ impl ClientSessionContext {
     ///
     /// Called when a client session's transport closes. A client that keys the transmitter and then
     /// disconnects (crash, cable pull, app kill) would otherwise leave the radio keyed until
-    /// the `ptt_max_tx_ms` safety ceiling fires — minutes of unintended transmission. This
+    /// the `ptt_max_tx_ms` safety ceiling fires - minutes of unintended transmission. This
     /// drops TX immediately on disconnect (design §8.5), mirroring the orderly-shutdown path.
     pub(crate) async fn release_ptt_on_disconnect(&self) {
         if self.ptt.owner() != Some(self.session_id) {

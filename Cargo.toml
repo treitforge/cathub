@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cathub",
+    "crates/cathub-protocol",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/treitforge/cathub"
+
+[workspace.dependencies]
+async-trait = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serial2-tokio = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
+toml = "0.8"
+toml_edit = "0.22"
+tonic = "0.12"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_precision_loss = "warn"
+cast_lossless = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+inefficient_to_string = "warn"
+large_futures = "warn"
+large_stack_arrays = "warn"
+needless_pass_by_value = "warn"
+cloned_instead_of_copied = "warn"
+manual_string_new = "warn"
+implicit_clone = "warn"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"

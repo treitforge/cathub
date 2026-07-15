@@ -1,9 +1,9 @@
-//! Generate the shared protobuf contract used by the `CatHub` `WinKeyer` broker.
+//! Generate `CatHub`'s public `WinKeyer` broker protocol.
 
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_root = PathBuf::from("../../../proto");
+    let proto_root = PathBuf::from("proto");
     println!("cargo::rerun-if-changed={}", proto_root.display());
     let service_root = proto_root.join("services");
     let protos: Vec<_> = [
@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .into_iter()
     .map(|file| service_root.join(file))
     .collect();
+
     tonic_build::configure()
         .build_server(true)
         .build_client(true)

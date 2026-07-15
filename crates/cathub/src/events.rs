@@ -1,6 +1,6 @@
 //! Central native-push ownership and the baseline poller (design §8.4).
 //!
-//! The daemon — not any client — owns the radio's spontaneous-update stream. At startup
+//! The daemon - not any client - owns the radio's spontaneous-update stream. At startup
 //! (and on reconnect) it enables the rig's native push (`AI2;` on a TS-590) once and keeps
 //! it on for the daemon's lifetime. Per-endpoint auto-info is virtualized in [`crate::dialect`]
 //! and never reaches the wire.

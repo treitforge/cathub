@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A software architecture note explaining how QsoRipper CatHub coordinates shared access to a radio and physical WinKeyer.">
+  <meta name="description" content="A software architecture note explaining how CatHub coordinates shared access to a radio and physical WinKeyer.">
   <title>CatHub Architecture: Shared Control of a Radio and WinKeyer</title>
   <style>
     :root {
@@ -398,7 +398,7 @@
   <a class="skip-link" href="#content">Skip to content</a>
   <header class="document-bar">
     <div class="bar-inner">
-      <a class="document-name" href="#top">QsoRipper <span>/ CatHub architecture</span></a>
+      <a class="document-name" href="#top">CatHub <span>/ architecture</span></a>
       <span class="document-kind">Software architecture note</span>
     </div>
   </header>
@@ -425,7 +425,7 @@
 
     <article id="content">
       <header class="document-header">
-        <p class="kicker">QsoRipper engineering documentation</p>
+        <p class="kicker">CatHub engineering documentation</p>
         <h1>CatHub Architecture: Shared Control of a Radio and WinKeyer</h1>
         <p class="subtitle">CatHub allows applications using OmniRig, Hamlib NET, native CAT serial interfaces, virtual WinKeyer interfaces, and typed APIs to safely share one physical station.</p>
         <dl class="doc-meta">
@@ -822,7 +822,7 @@
 
       <section id="implementation" aria-labelledby="implementation-heading">
         <h2 id="implementation-heading"><span class="section-number">11.</span> Current implementation and limitations</h2>
-        <p>The preceding sections describe the architecture. This section identifies what the current QsoRipper implementation supports and where the general design remains intentionally bounded.</p>
+        <p>The preceding sections describe the architecture. This section identifies what the current CatHub implementation supports and where the general design remains intentionally bounded.</p>
         <div class="table-scroll wide">
           <table>
             <thead><tr><th>Area</th><th>Current implementation</th><th>Limitation or qualification</th></tr></thead>
@@ -872,18 +872,18 @@
         <h3>References</h3>
         <ol class="references">
           <li><a href="https://github.com/treitforge/qsoripper/blob/main/docs/architecture/engine-specification.md">QsoRipper engine specification</a>, especially the CAT hub endpoint, dialect, state, WinKeyer, and PTT contracts.</li>
-          <li><a href="https://github.com/treitforge/qsoripper/blob/main/docs/design/cathub-multi-client-cat-hub.md">Multi-client CAT hub design</a> and <a href="https://github.com/treitforge/qsoripper/blob/main/docs/design/cathub-winkeyer-broker.md">multi-client WinKeyer broker design</a>.</li>
-          <li><a href="https://github.com/treitforge/qsoripper/blob/main/docs/integrations/cathub-setup.md">CatHub operator setup</a> and <a href="https://github.com/treitforge/qsoripper/blob/main/docs/integrations/cw-keying.md">CW keying setup</a>.</li>
+          <li><a href="https://github.com/treitforge/cathub/blob/main/docs/design/multi-client-cat-hub.md">Multi-client CAT hub design</a> and <a href="https://github.com/treitforge/cathub/blob/main/docs/design/winkeyer-broker.md">multi-client WinKeyer broker design</a>.</li>
+          <li><a href="https://github.com/treitforge/cathub/blob/main/docs/integration/setup.md">CatHub operator setup</a> and <a href="https://github.com/treitforge/qsoripper/blob/main/docs/integrations/cw-keying.md">CW keying setup</a>.</li>
           <li><a href="https://www.dxatlas.com/OmniRig/">OmniRig product documentation</a>.</li>
           <li><a href="https://hamlib.sourceforge.net/html/rigctld.1.html">Hamlib rigctld manual</a>.</li>
           <li><a href="https://learn.microsoft.com/en-us/windows/win32/devio/communications-resource-handles">Microsoft documentation for communications resource handles</a>.</li>
           <li><a href="https://com0com.sourceforge.net/">com0com project documentation</a>.</li>
-          <li>Implementation: <a href="https://github.com/treitforge/qsoripper/blob/main/src/rust/qsoripper-cathub/src/serial_endpoint.rs"><code>serial_endpoint.rs</code></a>, <a href="https://github.com/treitforge/qsoripper/blob/main/src/rust/qsoripper-cathub/src/hamlib_net.rs"><code>hamlib_net.rs</code></a>, the radio <a href="https://github.com/treitforge/qsoripper/tree/main/src/rust/qsoripper-cathub/src/dialect"><code>dialect</code> modules</a>, and the <a href="https://github.com/treitforge/qsoripper/tree/main/src/rust/qsoripper-cathub/src/winkeyer"><code>winkeyer</code> modules</a>.</li>
+          <li>Implementation: <a href="https://github.com/treitforge/cathub/blob/main/crates/cathub/src/serial_endpoint.rs"><code>serial_endpoint.rs</code></a>, <a href="https://github.com/treitforge/cathub/blob/main/crates/cathub/src/hamlib_net.rs"><code>hamlib_net.rs</code></a>, the radio <a href="https://github.com/treitforge/cathub/tree/main/crates/cathub/src/dialect"><code>dialect</code> modules</a>, and the <a href="https://github.com/treitforge/cathub/tree/main/crates/cathub/src/winkeyer"><code>winkeyer</code> modules</a>.</li>
         </ol>
       </section>
     </article>
   </div>
 
-  <footer><div class="footer-inner">QsoRipper CatHub architecture note. Equipment names and port assignments are documented examples, not required deployment values.</div></footer>
+  <footer><div class="footer-inner">CatHub architecture note. Equipment names and port assignments are documented examples, not required deployment values.</div></footer>
 </body>
 </html>

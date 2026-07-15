@@ -28,7 +28,7 @@ const REPLY_TIMEOUT: Duration = Duration::from_millis(1_000);
 /// Priority class for scheduling across endpoints. Lower discriminant wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Priority {
-    /// PTT (keying) — always preempts everything else at selection time.
+    /// PTT (keying) - always preempts everything else at selection time.
     Ptt = 0,
     /// Interactive client writes (frequency, mode, split).
     Write = 1,

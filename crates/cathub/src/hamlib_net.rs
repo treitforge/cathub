@@ -1,7 +1,7 @@
 //! Hamlib `rigctld`-compatible TCP server endpoint (design §6/§8, validated against golden
 //! transcripts captured from a real `rigctld`, §10.1).
 //!
-//! This is a thin server-side reimplementation of the rigctld net protocol — it never
+//! This is a thin server-side reimplementation of the rigctld net protocol - it never
 //! links Hamlib (§8.8). It serves the QsoRipper engine (read-only endpoint) and WSJT-X
 //! (write/PTT endpoint). Modeled reads come from the universal state; writes go through
 //! [`ClientSessionContext::apply_modeled`] so they participate in serialization, the PTT lease, and
@@ -714,7 +714,7 @@ mod tests {
     }
 
     /// Put the radio on physical VFO B (14.074 USB) with VFO A on 14.035 CW, split on
-    /// with TX on the inactive VFO — the classic state a single-VFO logger must collapse
+    /// with TX on the inactive VFO - the classic state a single-VFO logger must collapse
     /// to "operating VFO is VFOA".
     fn operating_on_b(state: &StateHandle) {
         state.record(
@@ -1227,7 +1227,7 @@ mod tests {
     async fn erp_set_vfo_query_lists_supported_vfos() {
         // Log4OM-NG opens every session with `;V ?` (extended set_vfo query). The reply
         // must echo the command, list the supported VFOs (newline before RPRT, matching
-        // real rigctld), and end with RPRT 0 — all `;`-separated on one logical block.
+        // real rigctld), and end with RPRT 0 - all `;`-separated on one logical block.
         let (ctx, _b, _s) = ctx_with(EndpointPermissions::from_tokens(&["read", "write"]));
         assert_eq!(
             reply_of(";V ?", &ctx).await,
@@ -1420,7 +1420,7 @@ mod tests {
     #[tokio::test]
     async fn single_vfo_erp_get_vfo_info_follows_operating_vfo_as_vfoa() {
         // Log4OM bug: it polls `+\get_vfo_info VFOA` and must see the OPERATING VFO (B),
-        // presented as VFOA, with split hidden — not stale physical VFO A.
+        // presented as VFOA, with split hidden - not stale physical VFO A.
         let (ctx, _b, state) = ctx_single_vfo(EndpointPermissions::from_tokens(&["read", "write"]));
         operating_on_b(&state);
         assert_eq!(
@@ -1500,7 +1500,7 @@ mod tests {
     #[tokio::test]
     async fn dual_vfo_get_vfo_info_still_reports_literal_physical_vfo() {
         // Regression guard: a non-single-VFO endpoint (e.g. the engine endpoint) keeps the
-        // faithful dual-VFO view — `get_vfo_info VFOA` returns physical VFO A even when
+        // faithful dual-VFO view - `get_vfo_info VFOA` returns physical VFO A even when
         // operating on B, and real split is reported.
         let (ctx, _b, state) = ctx_with(EndpointPermissions::from_tokens(&["read", "write"]));
         operating_on_b(&state);

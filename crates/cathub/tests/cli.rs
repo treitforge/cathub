@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use qsoripper_cathub::{run, Cli};
+use cathub::{run, Cli};
 
 fn temp_config(contents: &str, tag: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("cathub-cli-{}-{}.toml", std::process::id(), tag));
@@ -22,8 +22,10 @@ async fn dry_run_accepts_a_valid_loopback_config() {
     );
     let cli = Cli {
         config: Some(path.clone()),
+        section: None,
         log: None,
         dry_run: true,
+        command: None,
     };
     assert!(run(cli).await.is_ok());
     let _ = std::fs::remove_file(&path);
@@ -38,8 +40,10 @@ async fn dry_run_rejects_an_invalid_backend() {
     );
     let cli = Cli {
         config: Some(path.clone()),
+        section: None,
         log: None,
         dry_run: true,
+        command: None,
     };
     assert!(run(cli).await.is_err());
     let _ = std::fs::remove_file(&path);
@@ -49,8 +53,10 @@ async fn dry_run_rejects_an_invalid_backend() {
 async fn missing_config_is_an_error() {
     let cli = Cli {
         config: Some(PathBuf::from("definitely-missing-cathub-config.toml")),
+        section: None,
         log: None,
         dry_run: true,
+        command: None,
     };
     assert!(run(cli).await.is_err());
 }

@@ -1,11 +1,11 @@
-# qsoripper-cathub configuration for this station.
+# cathub configuration for this station.
 #
 # One daemon owns the TS-590 on COM4 (Silicon Labs CP210x USB-UART) and fans it out to
 # every application over its native protocol. No application talks to the radio directly,
 # so there is no VFO A/B oscillation, no frequency drift, and no PTT contention.
 #
 # Validate without touching hardware:
-#   cargo run -p qsoripper-cathub -- --config config/cathub.toml --dry-run
+#   cargo run -p cathub -- --config config/cathub.toml --dry-run
 #
 # Virtual serial pairs (com0com): the daemon binds the first port of each pair, the
 # application binds the second. Create one pair per serial client.

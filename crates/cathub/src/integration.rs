@@ -1,8 +1,8 @@
 //! Cross-module integration tests (design §10.2).
 //!
-//! These bring up the full stack — universal state, the priority scheduler over a
+//! These bring up the full stack - universal state, the priority scheduler over a
 //! [`LoopbackBackend`], multiple serial endpoints over `tokio::io::duplex`, and the Hamlib net
-//! endpoint over real TCP — and assert the system-level invariants: one radio command per poll
+//! endpoint over real TCP - and assert the system-level invariants: one radio command per poll
 //! (reads are served from cache), no VFO-target traffic from a TS-2000 endpoint, cross-endpoint
 //! write visibility, front-panel fan-out, strict write ordering, PTT arbitration, and that
 //! the Hamlib net endpoint and a serial endpoint share one radio state.

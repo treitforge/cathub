@@ -32,6 +32,9 @@ pub enum ConfigError {
     /// The config file is not valid TOML or has the wrong shape.
     #[error("parsing config: {0}")]
     Parse(#[from] toml::de::Error),
+    /// The effective configuration could not be serialized.
+    #[error("serializing config: {0}")]
+    Serialize(#[from] toml::ser::Error),
     /// The config parsed but is semantically invalid.
     #[error("invalid config: {0}")]
     Invalid(String),
