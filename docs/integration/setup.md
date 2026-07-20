@@ -8,8 +8,11 @@ ports and clients used by your station.
 ## 1. Install CatHub
 
 Download the matching platform archive from the
-[GitHub Releases page](https://github.com/treitforge/cathub/releases), verify the adjacent
-SHA-256 checksum, extract it, and place `cathub` or `cathub.exe` on `PATH`.
+[GitHub Releases page](https://github.com/treitforge/cathub/releases).
+Download the adjacent SHA-256 checksum.
+Verify the archive with the checksum.
+Extract the archive.
+Put `cathub` or `cathub.exe` on `PATH`.
 
 If Rust 1.88 or newer is already installed, the equivalent installation from crates.io is:
 
@@ -45,9 +48,10 @@ Record:
 - every application that needs radio state, radio writes, PTT, or keying
 - whether each application supports Hamlib NET, a vendor serial dialect, or WinKeyer serial
 
-Only CatHub may open the physical radio and keyer ports. Stop any `rigctld`, serial bridge,
-logger, digital-mode program, or manufacturer utility that currently owns either device.
-Remove startup tasks that would relaunch an old bridge.
+Only CatHub can open the physical radio and keyer ports.
+Stop each program that currently owns either device.
+These programs can include `rigctld`, serial bridges, loggers, and manufacturer utilities.
+Remove startup tasks that can start an old bridge.
 
 Do not proceed until the physical ports are free.
 
@@ -93,9 +97,19 @@ default:
 
 Set `CATHUB_CONFIG_PATH` or pass `--config` to use another location.
 
-The standalone file uses top-level `[radio]`, `[poll]`, `[ptt]`, `[events]`,
-`[[serial_endpoint]]`, `[[hamlib_net]]`, `[winkeyer]`, and `[[winkeyer_endpoint]]` tables.
-Delete unused example endpoints and replace every port with the station's actual values.
+The standalone file uses these top-level tables:
+
+- `[radio]`
+- `[poll]`
+- `[ptt]`
+- `[events]`
+- `[[serial_endpoint]]`
+- `[[hamlib_net]]`
+- `[winkeyer]`
+- `[[winkeyer_endpoint]]`
+
+Delete unused example endpoints.
+Replace each port with the station's actual value.
 
 The radio baud must match the radio's menu setting. Virtual serial endpoint baud values
 describe the client-facing protocol and do not replace the physical radio baud.
@@ -163,7 +177,7 @@ Add clients one at a time. Confirm read behavior before enabling writes or PTT.
 ### Read-only Hamlib NET client
 
 Point any logger or monitor that supports Hamlib NET rigctl at the configured read-only
-listener, such as `127.0.0.1:4532`. It should receive frequency, mode, VFO, split, and power
+listener, such as `127.0.0.1:4532`. It must receive frequency, mode, VFO, split, and power
 data when the backend exposes them. Set commands must fail.
 
 ### WSJT-X
@@ -217,7 +231,9 @@ scoped to that client.
 
 ## 8. Safety acceptance
 
-Perform transmit tests while attended and into a suitable load:
+Connect the transmitter to a suitable load.
+Make sure that an operator attends all transmit tests.
+Then do these tests:
 
 1. Verify read-only endpoints reject frequency, mode, and PTT writes.
 2. Key and unkey from one authorized CAT client.

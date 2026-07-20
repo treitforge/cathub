@@ -437,7 +437,7 @@
 
       <section id="summary" aria-labelledby="summary-heading">
         <h2 id="summary-heading"><span class="section-number">1.</span> Executive summary</h2>
-        <p class="lead">A station may run several programs that expect exclusive access to the same radio or keyer. Those programs also speak different protocols and have different authority. CatHub places one coordination boundary between the software and the physical devices.</p>
+        <p class="lead">A station can run several programs that expect exclusive access to the same radio or keyer. Those programs use different protocols and have different authority. CatHub places one coordination boundary between the software and the physical devices.</p>
         <p>CatHub is the sole owner of the radio control link and physical WinKeyer. Client applications connect to private serial or loopback network endpoints that match the protocol they already understand. Inside the daemon, separate radio and WinKeyer brokers serialize work, maintain shared state, apply endpoint permissions, and use one station-wide push-to-talk (PTT) lease.</p>
         <p>The design lets existing applications continue to use OmniRig, Hamlib NET, vendor CAT commands, or the WinKeyer host protocol. It does not make the physical serial ports shareable. It replaces direct hardware access with explicit, managed endpoints.</p>
       </section>
@@ -445,7 +445,7 @@
       <section id="problem" aria-labelledby="problem-heading">
         <h2 id="problem-heading"><span class="section-number">2.</span> Problem and scope</h2>
         <p>A modern amateur radio station often combines a panadapter, logger, digital-mode program, manufacturer control application, and logging engine. The transceiver and WinKeyer each expose one stateful hardware connection, while every application behaves as though it owns that connection.</p>
-        <p>OmniRig coordinates programs that use its automation API. Hamlib's <code>rigctld</code> coordinates programs that use Hamlib NET. A native CAT program still requires a serial port, and legacy CW software may require a physical-looking WinKeyer port. These coordinators do not share station-wide state or transmit ownership with one another.</p>
+        <p>OmniRig coordinates programs that use its automation API. Hamlib's <code>rigctld</code> coordinates programs that use Hamlib NET. A native CAT program still requires a serial port. Legacy CW software can require a physical-looking WinKeyer port. These coordinators do not share station-wide state or transmit ownership.</p>
 
         <div class="table-scroll wide">
           <table>
@@ -454,7 +454,7 @@
               <tr><td>OmniRig</td><td>Programs using the OmniRig automation API.</td><td>Native serial CAT and Hamlib NET clients cannot use that API directly.</td><td>Remains a coordinator for its clients and connects to a private CatHub serial endpoint.</td></tr>
               <tr><td>Hamlib <code>rigctld</code></td><td>Programs using the rigctld-compatible TCP protocol.</td><td>Programs requiring a COM port or vendor CAT dialect cannot connect to its socket.</td><td>Hamlib-aware programs connect to dedicated CatHub network endpoints.</td></tr>
               <tr><td>Direct serial CAT</td><td>One program speaking a supported vendor command set.</td><td>Serial ports are normally exclusive, and independent command streams cannot be safely combined.</td><td>Each program receives a private virtual COM pair backed by a CatHub serial endpoint.</td></tr>
-              <tr><td>Direct WinKeyer access</td><td>One host session using the stateful WinKeyer byte protocol.</td><td>Client state, buffered Morse, status bytes, and maintenance replies cannot be interleaved safely.</td><td>Legacy programs use private virtual endpoints; native clients use a typed loopback API.</td></tr>
+              <tr><td>Direct WinKeyer access</td><td>One host session using the stateful WinKeyer byte protocol.</td><td>Client state, buffered Morse, status bytes, and maintenance replies cannot be interleaved safely.</td><td>Legacy programs use private virtual endpoints. Native clients use a typed loopback API.</td></tr>
             </tbody>
             <caption>Table 1. Existing coordinators solve compatibility within a client group, not across the complete station.</caption>
           </table>
@@ -571,7 +571,7 @@
           </div>
           <figcaption><span class="figure-title"><span class="figure-number">Figure 2.</span> Detailed CatHub topology.</span>Client-specific adapters remain at the edge. Shared state and scheduling sit inside the brokers, while the physical devices remain single-owner resources.</figcaption>
         </figure>
-        <p class="takeaway">The major architectural boundary is hardware ownership: applications may differ in transport and protocol, but none bypasses the broker that owns the corresponding device.</p>
+        <p class="takeaway">Hardware ownership is the major architecture boundary. Applications can use different transports and protocols. No application bypasses the applicable device broker.</p>
       </section>
 
       <section id="components" aria-labelledby="components-heading">
@@ -581,12 +581,12 @@
           <table class="responsibility-table">
             <thead><tr><th>Component</th><th>Primary responsibility</th><th>Important boundary</th></tr></thead>
             <tbody>
-              <tr><td>Endpoint adapters</td><td>Accept serial, Hamlib NET, virtual WinKeyer, or typed gRPC clients; create client sessions; frame and parse requests.</td><td>An endpoint fixes the protocol, permissions, and compatibility policy before a client connects.</td></tr>
+              <tr><td>Endpoint adapters</td><td>Accept serial, Hamlib NET, virtual WinKeyer, or typed gRPC clients. Create client sessions. Frame and parse requests.</td><td>An endpoint fixes the protocol, permissions, and compatibility policy before a client connects.</td></tr>
               <tr><td>Client dialects</td><td>Translate supported CAT commands into shared operations and format protocol-specific replies or events.</td><td>Dialects use shared state and capabilities, not a concrete radio backend.</td></tr>
               <tr><td>Radio broker</td><td>Serialize radio operations, preserve per-session FIFO order, prioritize interactive work, and reconnect the hardware transport.</td><td>Only this actor submits work to the active radio backend.</td></tr>
               <tr><td>Radio backend</td><td>Implement modeled operations and native passthrough for a physical radio or an upstream rigctld process.</td><td>Radio-specific behavior is isolated behind backend capabilities.</td></tr>
               <tr><td>Shared radio state</td><td>Store modeled VFO, frequency, mode, split, RIT/XIT, meter, power, and PTT state with freshness metadata.</td><td>All modeled mutations and downstream change notifications pass through this state.</td></tr>
-              <tr><td>Poller and event fan-out</td><td>Coalesce baseline polling, consume native push events, update shared state, and notify interested endpoints.</td><td>Native push reduces polling per covered field; it does not disable polling for uncovered fields.</td></tr>
+              <tr><td>Poller and event fan-out</td><td>Coalesce baseline polling, consume native push events, update shared state, and notify interested endpoints.</td><td>Native push reduces polling for each covered field. It does not disable polling for uncovered fields.</td></tr>
               <tr><td>WinKeyer broker</td><td>Virtualize client sessions, preserve client profiles, schedule atomic CW jobs, route status, and isolate maintenance.</td><td>Client bytes and commands are never interleaved inside another client's active job.</td></tr>
               <tr><td>Hardware actors</td><td>Own the physical radio or WinKeyer transport and recover it with bounded backoff after failure.</td><td>Client endpoints remain available while a physical device reconnects.</td></tr>
               <tr><td>PTT lease</td><td>Grant one station-wide transmit owner across CAT PTT and WinKeyer activity.</td><td>A conflicting owner is rejected rather than allowed to contend.</td></tr>
@@ -622,8 +622,8 @@
         </div>
 
         <h3>Virtual serial pairs</h3>
-        <p>A com0com pair on Windows, or a PTY pair on Linux, behaves like a null-modem cable between two processes. Bytes written at one endpoint appear at the other. The pair does not make either endpoint shareable; CatHub and the application must open opposite sides.</p>
-        <p>In a serial endpoint configuration, <code>transport</code> is the port CatHub opens. <code>application_transport</code> records the paired port the operator assigns to the application. The latter is operator guidance and setup metadata; CatHub does not open it.</p>
+        <p>A com0com pair on Windows, or a PTY pair on Linux, acts as a null-modem cable. Bytes from one endpoint appear at the other. The pair does not make an endpoint shareable. CatHub and the application must open opposite sides.</p>
+        <p>In a serial endpoint configuration, <code>transport</code> is the port CatHub opens. <code>application_transport</code> records the paired application port. This value gives operator guidance and setup metadata. CatHub does not open it.</p>
 
         <figure class="wide">
           <div class="diagram-surface connection-pair" role="img" aria-label="Two example connection paths. OmniRig opens COM11, paired with CatHub COM10, and CatHub controls the radio on COM4. N1MM opens COM41, paired with CatHub COM40, and CatHub controls the physical WinKeyer on COM3.">
@@ -680,7 +680,7 @@
           </div>
           <figcaption><span class="figure-title"><span class="figure-number">Figure 4.</span> CAT request and state-update sequence.</span>Per-session FIFO ordering is preserved. Across ready session heads, PTT and interactive writes take priority over routine reads and baseline polling.</figcaption>
         </figure>
-        <p>The result is one coherent station view. A front-panel change, an N1MM band change, or a WSJT-X frequency write updates the same model and can be reported to every compatible client without multiplying physical-radio polls.</p>
+        <p>The result is one coherent station view. Each front-panel or client change updates the same model. CatHub can report that change to each compatible client without additional radio polls.</p>
 
         <h3>8.2 Atomic CW scheduling</h3>
         <p>The WinKeyer protocol mixes client configuration, status, buffered commands, and Morse data. CatHub therefore schedules complete typed jobs and leased raw streams rather than forwarding bytes from several clients at once.</p>
@@ -697,7 +697,7 @@
                 <div class="message" style="grid-column:3/5;grid-row:4">3. Acquire PTT and apply client profile</div>
                 <div class="message" style="grid-column:3/5;grid-row:5">4. Send uninterrupted commands and Morse</div>
                 <div class="message reverse" style="grid-column:3/5;grid-row:6">5. Status, echo, and completion</div>
-                <div class="message reverse" style="grid-column:1/4;grid-row:7">6. Route result to owner; restore primary profile and release PTT</div>
+                <div class="message reverse" style="grid-column:1/4;grid-row:7">6. Route result to owner. Then restore the primary profile and release PTT.</div>
               </div>
             </div>
           </div>
@@ -732,7 +732,7 @@
               <tr><td>Transmit ceiling reached</td><td>Force receive or key-up, release the lease, and record the safety action.</td><td>A crashed or wedged client cannot hold continuous transmit indefinitely.</td></tr>
               <tr><td>PTT owner disconnects</td><td>Unkey immediately during session teardown and release only that owner's lease.</td><td>The transmitter returns to receive without waiting for the maximum-duration ceiling.</td></tr>
               <tr><td>CW job cancelled</td><td>Remove the requesting client's queued jobs. An authorized active abort clears the physical buffer and forces key-up.</td><td>Cancellation is scoped and does not remove another client's queued work.</td></tr>
-              <tr><td>Radio transport fails</td><td>Keep client endpoints open, mark shared state stale, reject mutations, and retry the backend with backoff.</td><td>Clients can distinguish cached status from live control; service resumes after reconnect.</td></tr>
+              <tr><td>Radio transport fails</td><td>Keep client endpoints open, mark shared state stale, reject mutations, and retry the backend with backoff.</td><td>Clients can distinguish cached status from live control. Service resumes after reconnect.</td></tr>
               <tr><td>WinKeyer transport fails</td><td>Cancel queued work, release station PTT, mark status disconnected, and reopen the port with bounded backoff.</td><td>No queued Morse resumes unexpectedly after a hardware interruption.</td></tr>
               <tr><td>WinKeyer maintenance begins</td><td>Require no active or queued transmission, clear and dekey, close the normal host session, and grant exclusive access.</td><td>Disruptive administrative commands cannot interleave with normal sending.</td></tr>
               <tr><td>Graceful shutdown</td><td>Attempt radio RX, clear the keyer buffer, force key-up, close the physical keyer host session, and release PTT.</td><td>An orderly service stop leaves hardware in a safe receive state.</td></tr>
@@ -743,13 +743,13 @@
         </div>
         <div class="callout">
           <strong>Implementation detail</strong>
-          <p>The transmit watchdog is a maximum continuous-transmit duration, not an inactivity timer. Digital-mode applications may key PTT and send no further CAT traffic until the over completes.</p>
+          <p>The transmit watchdog limits continuous transmission. It is not an inactivity timer. Digital-mode applications can key PTT without more CAT traffic until completion.</p>
         </div>
       </section>
 
       <section id="configuration" aria-labelledby="configuration-heading">
         <h2 id="configuration-heading"><span class="section-number">10.</span> Configuration and deployment</h2>
-        <p>Operators configure physical devices first, then create one endpoint for each application or authority group. The examples below use standalone CatHub section names. Managed TOML documents may nest the same sections under <code>cat_hub</code>.</p>
+        <p>Operators configure physical devices first. Then they create one endpoint for each application or authority group. The examples use standalone CatHub section names. Managed TOML documents can put the same sections under <code>cat_hub</code>.</p>
 
         <h3>10.1 Physical hardware and safety limits</h3>
         <div class="code-block">
@@ -811,7 +811,7 @@
         <h3>10.3 Operator deployment sequence</h3>
         <ol>
           <li>Create one virtual serial pair for each serial CAT or legacy WinKeyer application.</li>
-          <li>Configure the physical radio and WinKeyer ports. No client application should reference these ports.</li>
+          <li>Configure the physical radio and WinKeyer ports. Do not give these ports to a client application.</li>
           <li>Configure CatHub's side of every virtual pair as <code>transport</code> and record the application side as <code>application_transport</code>.</li>
           <li>Create separate loopback listeners when network clients require different permissions or compatibility views.</li>
           <li>Validate the configuration with CatHub's dry-run mode before opening hardware.</li>
@@ -829,10 +829,10 @@
             <tbody>
               <tr><td>Radio backends</td><td>Native Kenwood TS-590, upstream rigctld, and loopback test backends.</td><td>The native TS-590 backend is the first certified reference. Other radio families require additional backends or a validated rigctld pairing.</td></tr>
               <tr><td>Serial CAT dialects</td><td>TS-590, transparent TS-590, and TS-2000 client dialects.</td><td>Direct serial means a supported dialect over a private pair, not arbitrary serial protocol acceptance.</td></tr>
-              <tr><td>Hamlib NET</td><td>Modeled read/write operations, PTT, split and VFO queries, power queries, capability handshake, and raw CAT escape operations used by tested clients.</td><td>CatHub does not reimplement every Hamlib feature. Compatibility is defined by tested client transcripts.</td></tr>
-              <tr><td>Compatibility views</td><td>Optional single-VFO presentation for serial and Hamlib NET endpoints.</td><td>A single-VFO endpoint rejects real split enablement; WSJT-X must use Fake It rather than Rig split.</td></tr>
+              <tr><td>Hamlib NET</td><td>Modeled read/write operations, PTT, split and VFO queries, power queries, capability handshake, and raw CAT escape operations used by tested clients.</td><td>CatHub does not reimplement every Hamlib feature. Tested client transcripts define compatibility.</td></tr>
+              <tr><td>Compatibility views</td><td>Optional single-VFO presentation for serial and Hamlib NET endpoints.</td><td>A single-VFO endpoint rejects real split enablement. WSJT-X must use Fake It instead of Rig split.</td></tr>
               <tr><td>Native passthrough</td><td>Same-family rich TS-590 commands can pass through under command classification and permissions.</td><td>An upstream rigctld backend provides modeled control, not transparent vendor-command fidelity.</td></tr>
-              <tr><td>WinKeyer</td><td>Physical 1200 baud host session, virtual serial endpoints, typed gRPC jobs and events, profiles, status fan-out, cancellation, abort, and exclusive maintenance.</td><td>Only implemented and validated WinKeyer protocol behavior should be assumed; maintenance authority is deliberately restricted.</td></tr>
+              <tr><td>WinKeyer</td><td>Physical 1200 baud host session, virtual serial endpoints, typed gRPC jobs and events, profiles, status fan-out, cancellation, abort, and exclusive maintenance.</td><td>Assume only implemented and validated WinKeyer behavior. CatHub restricts maintenance authority.</td></tr>
               <tr><td>Network exposure</td><td>Hamlib NET and typed APIs bind to loopback in the supported deployment model.</td><td>Cross-host remote operation, authentication, and network security are outside the current scope.</td></tr>
               <tr><td>Station scale</td><td>One configured radio and one optional physical WinKeyer per CatHub instance.</td><td>Multi-radio orchestration is not part of the current runtime.</td></tr>
             </tbody>
@@ -844,11 +844,11 @@
       <section id="decisions" aria-labelledby="decisions-heading">
         <h2 id="decisions-heading"><span class="section-number">12.</span> Design decisions and tradeoffs</h2>
         <dl class="decision-list">
-          <div><dt>CatHub is the sole hardware owner.</dt><dd>Exclusive ownership makes ordering, recovery, and safety enforceable in one process. The tradeoff is that every application must be redirected to a CatHub endpoint and CatHub becomes required station infrastructure.</dd></div>
+          <div><dt>CatHub is the sole hardware owner.</dt><dd>Exclusive ownership controls ordering, recovery, and safety in one process. Each application must connect to a CatHub endpoint. Thus, the station requires CatHub.</dd></div>
           <div><dt>Each serial client receives a private virtual pair.</dt><dd>A private pair provides unambiguous protocol, permissions, client-session cleanup, and outbound event routing. It consumes more virtual port names than attempting to share one pair, but avoids an unsafe and generally unsupported multi-open arrangement.</dd></div>
           <div><dt>Radio and WinKeyer use separate brokers.</dt><dd>CAT is request/state oriented, while WinKeyer is a stateful byte protocol with buffered Morse, profiles, and private maintenance replies. Separate schedulers keep those ordering rules explicit. They still share the station PTT lease because both can cause transmission.</dd></div>
           <div><dt>CatHub maintains shared radio state instead of only forwarding bytes.</dt><dd>Shared state coalesces polling, fans out front-panel and client changes, translates between dialects, and supports consistent reads. The cost is a modeled state surface with freshness and invalidation rules, plus passthrough for rich commands outside that model.</dd></div>
-          <div><dt>Endpoints are configured explicitly.</dt><dd>Explicit dialects and permissions make behavior predictable and fail closed. The tradeoff is operational configuration: connecting an application to the wrong endpoint does not trigger automatic dialect detection, and the client receives only that endpoint's authority.</dd></div>
+          <div><dt>Endpoints use explicit configuration.</dt><dd>Explicit dialects and permissions give predictable fail-closed behavior. An incorrect endpoint does not start automatic dialect detection. The client receives only the authority of that endpoint.</dd></div>
           <div><dt>Compatibility views are endpoint policy.</dt><dd>A single-VFO view lets applications with simplified assumptions operate against either physical VFO without changing radio state. The view intentionally hides capabilities, such as real split, that it cannot represent honestly.</dd></div>
         </dl>
       </section>
@@ -861,7 +861,7 @@
           <dt>Dialect</dt><dd>A specific command vocabulary and reply format presented to a client, such as Kenwood TS-590 or TS-2000 CAT.</dd>
           <dt>Transport</dt><dd>The mechanism that carries bytes, such as a physical serial port, virtual COM endpoint, PTY, or TCP socket.</dd>
           <dt>Endpoint</dt><dd>A configured CatHub listener or serial path with a fixed protocol, permissions, and compatibility policy.</dd>
-          <dt>Virtual COM pair</dt><dd>Two linked virtual serial endpoints. Each is opened by one process; bytes written to either side arrive at the other.</dd>
+          <dt>Virtual COM pair</dt><dd>Two linked virtual serial endpoints. One process opens each endpoint. Bytes written to one side arrive at the other.</dd>
           <dt>Client session</dt><dd>One live connection to an endpoint, with its own internal ID, ordering, PTT ownership, queues, and disconnect cleanup.</dd>
           <dt>Hamlib NET</dt><dd>The rigctld-compatible TCP protocol used by Hamlib-aware applications to control a radio.</dd>
           <dt>OmniRig</dt><dd>A Windows automation component that allows compatible applications to share configured radio instances.</dd>

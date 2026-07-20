@@ -1,11 +1,12 @@
 # CatHub
 
-CatHub lets radio applications that use CAT, Hamlib NET, virtual serial, and WinKeyer
-interfaces safely share one transceiver and keyer.
+CatHub lets radio applications safely share one transceiver and one keyer.
+Clients can use CAT, Hamlib NET, virtual serial, or WinKeyer interfaces.
 
-The daemon is the single owner of each physical device. It serializes mutations, serves
-separately permissioned client endpoints, arbitrates PTT, and leaves the station unkeyed
-after shutdown or a failed client session.
+The daemon is the only owner of each physical device.
+It puts all changes in sequence and gives each client separate permissions.
+It also controls PTT.
+The daemon leaves the station unkeyed after shutdown or a client failure.
 
 ## Current support
 
@@ -25,9 +26,12 @@ Install the daemon from crates.io with Rust 1.88 or newer:
 cargo install cathub --version 0.1.1
 ```
 
-Alternatively, download the Windows or Linux archive and adjacent SHA-256 checksum from the
-[GitHub Releases page](https://github.com/treitforge/cathub/releases). Extract the archive
-and place `cathub` or `cathub.exe` on `PATH`.
+You can also download the Windows or Linux archive from the
+[GitHub Releases page](https://github.com/treitforge/cathub/releases).
+Download the adjacent SHA-256 checksum.
+Verify the archive with the checksum.
+Extract the archive.
+Put `cathub` or `cathub.exe` on `PATH`.
 
 To build the daemon from source:
 
@@ -37,9 +41,9 @@ Set-Location cathub
 cargo build --release -p cathub
 ```
 
-The source-built executable is `target\release\cathub.exe` on Windows and
-`target/release/cathub` on Linux. A daemon operator does not need either
-protocol-development package described below.
+The Windows executable is `target\release\cathub.exe`.
+The Linux executable is `target/release/cathub`.
+A daemon operator does not need the protocol development packages.
 
 ## Build and test
 
@@ -74,9 +78,9 @@ CatHub's default configuration path is:
 Set `CATHUB_CONFIG_PATH` or pass `--config` to use another file. The complete example is
 [config/cathub.toml](config/cathub.toml).
 
-A standalone document uses top-level `[radio]`, `[winkeyer]`, and endpoint tables. CatHub
-also accepts those settings beneath `[cat_hub]` in a larger managed document. Use
-`--section cat_hub` when a launcher must require the embedded layout.
+A standalone document uses top-level `[radio]`, `[winkeyer]`, and endpoint tables.
+CatHub also accepts these settings below `[cat_hub]` in a managed document.
+Use `--section cat_hub` to require the embedded layout.
 
 Validate and inspect configuration without opening hardware:
 
@@ -94,14 +98,15 @@ cathub config migrate `
   --output "$env:APPDATA\cathub\cathub.toml"
 ```
 
-Migration refuses to overwrite an existing destination unless `--force` is supplied.
-Source removal is never automatic. `--remove-source-section` creates a `.bak` copy before
-changing the managed document.
+Migration does not overwrite an existing destination unless you supply `--force`.
+Migration does not remove the source automatically.
+`--remove-source-section` creates a `.bak` copy before it changes the managed document.
 
 ## Run
 
-The repository helper builds the daemon when necessary, copies the sample configuration to
-the platform default on first use, and starts CatHub:
+The repository helper builds the daemon when necessary.
+On first use, it copies the sample configuration to the default location.
+Then it starts CatHub:
 
 ```powershell
 .\scripts\Start-CatHub.ps1
@@ -126,20 +131,22 @@ port directly.
 
 ## Protocol packages
 
-The `cathub` crate builds and installs the daemon. `cathub-protocol` is the Rust
-client/server contract crate. `CatHub.Protocol` is the .NET client package project. The
-protocol packages are for applications that use the typed WinKeyer API and are not required
-to run the daemon.
+The `cathub` crate builds and installs the daemon.
+`cathub-protocol` is the Rust client/server contract crate.
+`CatHub.Protocol` is the .NET client package project.
+Applications use these packages with the typed WinKeyer API.
+You do not need them to run the daemon.
 
-The release workflow packages both protocol artifacts into a GitHub release. Published
-client packages are available as
+The release workflow puts both protocol artifacts in a GitHub release.
+Published client packages are available as
 [`cathub-protocol`](https://crates.io/crates/cathub-protocol) for Rust and
-[`CatHub.Protocol`](https://www.nuget.org/packages/CatHub.Protocol) for .NET. Registry
-publication remains a separate release-authority operation. See
+[`CatHub.Protocol`](https://www.nuget.org/packages/CatHub.Protocol) for .NET.
+Registry publication is a separate authorized operation. See
 [release and compatibility](docs/architecture/release-and-compatibility.md).
 
 ## Documentation
 
+- [Documentation standard](docs/documentation-style.md)
 - [Architecture report](docs/architecture/index.html)
 - [Radio hub design](docs/design/multi-client-cat-hub.md)
 - [WinKeyer broker design](docs/design/winkeyer-broker.md)
