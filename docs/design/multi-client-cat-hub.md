@@ -47,21 +47,24 @@ pair because a virtual COM port is still exclusive at either endpoint.
 
 ## Radio state model
 
-CatHub maintains a universal radio snapshot containing operating frequency, mode, VFO,
-split state, RIT/XIT, PTT, and configured transmit power when the backend can provide it.
+CatHub maintains one common radio snapshot.
+It contains frequency, mode, VFO, split state, RIT/XIT, PTT, and configured transmit power.
+The snapshot contains a field only when the backend supplies it.
 
-All modeled writes pass through one scheduler. Reads are served from the snapshot when the
-field is fresh. The native TS-590 backend enables the radio's auto-information stream and
-uses a low-rate heartbeat once push events cover a field. Polling never sends VFO-select or
-VFO-retarget commands.
+One scheduler controls all modeled writes.
+CatHub serves a read from the snapshot when the field is fresh.
+The native TS-590 backend enables the radio's auto-information stream.
+It uses a low-rate heartbeat when push events supply a field.
+Polling never sends VFO-select or VFO-retarget commands.
 
 Client sessions receive state-change notifications translated into their configured
 dialect. A session's auto-information preference is virtual and does not enable or disable
 the radio's physical push stream.
 
-Commands outside the modeled state can use the supported passthrough path. Passthrough is
-serialized with modeled work, invalidates affected cached fields, and remains subject to
-endpoint permissions.
+Commands outside the modeled state can use the supported passthrough path.
+The scheduler puts passthrough commands in sequence with modeled work.
+Passthrough commands invalidate the related cached fields.
+Endpoint permissions also apply to passthrough commands.
 
 ## Backends
 
@@ -75,7 +78,7 @@ and reads configured power from `PC;`.
 
 The bridge backend is the sole client of a private downstream `rigctld`. Client applications
 still connect to CatHub, not to that private process. Required state probes drive the common
-snapshot. Optional split and power probes may return Hamlib's not-supported result without
+snapshot. Optional split and power probes can return Hamlib's not-supported result without
 failing baseline operation.
 
 ### Loopback
@@ -86,13 +89,13 @@ The loopback backend supports deterministic tests without radio hardware.
 
 ### Hamlib NET
 
-Each `[[hamlib_net]]` entry creates a TCP listener with its own permissions. Separate
-listeners should be used for different authority groups, such as read-only monitors and
+Each `[[hamlib_net]]` entry creates a TCP listener with its own permissions.
+Use separate listeners for different authority groups, such as read-only monitors and
 digital-mode programs allowed to write and key PTT.
 
-The endpoint implements the tested subset of the `rigctld` network protocol, including
-ordinary and extended-response forms used by supported clients. Compatibility is defined by
-captured transcripts and tests, not by a claim to implement every Hamlib command.
+The endpoint implements the tested subset of the `rigctld` network protocol.
+It includes ordinary and extended-response forms for supported clients.
+Captured transcripts and tests define compatibility. CatHub does not claim support for every Hamlib command.
 
 ### Serial CAT
 
@@ -101,18 +104,18 @@ opens `application_transport`, the other side of that pair. A configured dialect
 client's command stream and translates modeled operations into the shared scheduler.
 
 The transparent TS-590 dialect relays the real dual-VFO stream and therefore cannot use
-single-VFO presentation. Modeled TS-590 and TS-2000 endpoints may enable `single_vfo` when a
+single-VFO presentation. Modeled TS-590 and TS-2000 endpoints can enable `single_vfo` when a
 client cannot operate correctly while VFO B is active.
 
 ### Single-VFO presentation
 
 `single_vfo = true` presents the current operating VFO as VFO A without changing the radio.
-Reads, writes, and notifications still target the real operating VFO. Real A/B split cannot
-be represented through this view, so split-enable requests are rejected.
+Reads, writes, and notifications still target the real operating VFO.
+This view cannot represent real A/B split. Thus, CatHub rejects split-enable requests.
 
 ## Permissions
 
-Permissions are fixed per endpoint:
+Each endpoint has fixed permissions:
 
 | Permission | Allows |
 |---|---|
@@ -129,7 +132,7 @@ different listeners.
 ## PTT ownership and safety
 
 CAT PTT and WinKeyer transmit jobs use one station-wide ownership manager. Only one session
-may own transmit authority at a time. A conflicting request fails deterministically.
+can own transmit authority at a time. A conflicting request fails deterministically.
 
 The safety rules are:
 
@@ -166,7 +169,7 @@ single_vfo = true
 perms = ["read", "write", "ptt"]
 ```
 
-The same tables may be embedded beneath `[cat_hub]` in a managed TOML document. CatHub owns
+You can put the same tables beneath `[cat_hub]` in a managed TOML document. CatHub owns
 schema validation in both layouts. See [operator setup](../integration/setup.md) and the
 complete [sample configuration](../../config/cathub.toml).
 
@@ -185,13 +188,13 @@ bounded reconnect backoff while listeners and diagnostic state remain available 
 
 ## Verification
 
-The repository gate covers formatting, Clippy, unit and integration tests, protobuf lint,
-.NET protocol generation, and dependency policy. Protocol compatibility is verified with
-fixtures and transcript-oriented tests for supported commands.
+The repository gate covers formatting, Clippy, tests, protobuf lint, .NET protocol generation, and dependency policy.
+Fixtures and transcript tests verify protocol compatibility for supported commands.
 
-Hardware acceptance remains an attended activity. Validate one client at a time, confirm
-read-only rejection and PTT timeout behavior, then add concurrent clients while watching the
-CatHub log.
+An operator must attend hardware acceptance tests.
+Validate one client at a time.
+Confirm read-only rejection and PTT timeout behavior.
+Then add concurrent clients while you monitor the CatHub log.
 
 ## Implementation map
 
