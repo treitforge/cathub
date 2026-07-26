@@ -114,12 +114,24 @@ cathub config validate
 cathub
 ```
 
+An orchestrator can request an available typed API port:
+
+```powershell
+cathub --winkeyer-api-bind 127.0.0.1:0 --runtime-info .\cathub-runtime.json
+```
+
+CatHub publishes the selected endpoint after all configured listeners bind.
+The runtime file includes the CatHub process ID.
+Clients must validate that process ID before they use the endpoint.
+
 ## Client interfaces
 
 - Hamlib-aware clients connect to a configured `[[hamlib_net]]` TCP listener.
 - Serial CAT clients connect to the application side of a dedicated virtual serial pair.
 - Legacy WinKeyer clients connect to their own virtual serial pair.
 - Typed WinKeyer clients connect to the loopback gRPC address in `[winkeyer].api_bind`.
+
+A launcher-managed client uses the endpoint in CatHub's runtime file.
 
 Each endpoint has its own permissions. Applications never open the physical radio or keyer
 port directly.

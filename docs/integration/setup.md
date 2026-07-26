@@ -215,6 +215,12 @@ Use the loopback gRPC address in `[winkeyer].api_bind`, normally
 `http://127.0.0.1:50071`. Supply a stable `client_name` so cancellation and telemetry remain
 scoped to that client.
 
+An orchestrator can use `--winkeyer-api-bind 127.0.0.1:0`.
+Windows or Linux then selects an available loopback port.
+Use `--runtime-info <FILE>` to receive the effective endpoint and CatHub process ID.
+Read the runtime file only after CatHub publishes it.
+Validate the process ID before a client uses the endpoint.
+
 ## 8. Safety acceptance
 
 Perform transmit tests while attended and into a suitable load:
@@ -238,7 +244,7 @@ Perform transmit tests while attended and into a suitable load:
 | Writes return not supported | Check endpoint permissions and whether the command is modeled for that dialect. |
 | Digital mode stops on VFO B | Enable `single_vfo` for that client and use fake split. |
 | PTT is busy | Find the current lease owner in the log and confirm the previous client unkeyed. |
-| Typed keyer API is unavailable | Verify `[winkeyer].api_bind` is loopback and not already in use. |
+| Typed keyer API is unavailable | Verify `[winkeyer].api_bind` is loopback. An orchestrator can request port `0` and read `--runtime-info`. |
 | Maintenance is rejected | Stop active and queued sends, then connect through the `config_write` endpoint. |
 
 Set `CATHUB_LOG=debug` for verbose tracing. Narrow it to a module, such as
