@@ -29,6 +29,7 @@ mod model;
 mod permissions;
 mod ptt;
 mod radio;
+mod runtime_info;
 mod serial_endpoint;
 mod state;
 mod winkeyer;
@@ -36,6 +37,7 @@ mod winkeyer;
 #[cfg(test)]
 mod integration;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -55,13 +57,14 @@ use crate::dialect::kenwood::ts2000::Ts2000Dialect;
 use crate::dialect::kenwood::ts590::Ts590Dialect;
 use crate::dialect::{ClientDialect, ClientSessionContext};
 use crate::events::{spawn_poller, POLLER_SESSION};
-use crate::hamlib_net::run_listener;
+use crate::hamlib_net::{bind_listener as bind_hamlib_listener, run_listener};
 use crate::model::StateMutation;
 use crate::ptt::PttManager;
 use crate::radio::{
     link_channel, run_transport_supervised, spawn_scheduler, OpKind, Priority, RECONNECT_INITIAL,
     RECONNECT_MAX,
 };
+use crate::runtime_info::{HamlibEndpoint, RuntimeInfo};
 use crate::serial_endpoint::{open_serial, run_endpoint_session};
 use crate::state::StateHandle;
 use crate::winkeyer::{
@@ -101,6 +104,12 @@ pub struct Cli {
     /// Explicit top-level section to read from a managed configuration file.
     #[arg(long, global = true)]
     pub section: Option<String>,
+    /// Runtime override for the typed WinKeyer API bind address.
+    #[arg(long, global = true, value_name = "HOST:PORT")]
+    pub winkeyer_api_bind: Option<SocketAddr>,
+    /// Write effective endpoints here after all configured listeners bind.
+    #[arg(long, global = true, value_name = "FILE")]
+    pub runtime_info: Option<PathBuf>,
     /// Optional explicit log file path (informational; logging also writes a rolling file).
     #[arg(long)]
     pub log: Option<PathBuf>,
@@ -250,7 +259,16 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     if let Some(log) = &cli.log {
         tracing::debug!(log = %log.display(), "log path override requested");
     }
-    let cfg = Config::load_selected(&path, cli.section.as_deref())?;
+    let mut cfg = Config::load_selected(&path, cli.section.as_deref())?;
+
+    if let Some(bind) = cli.winkeyer_api_bind {
+        let Some(winkeyer) = cfg.winkeyer.as_mut() else {
+            return Err(CatHubError::Backend(
+                "--winkeyer-api-bind requires a configured [winkeyer] section".to_string(),
+            ));
+        };
+        winkeyer.api_bind = bind.to_string();
+    }
 
     if cli.dry_run {
         println!("{}", cfg.describe());
@@ -264,6 +282,7 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     let state = StateHandle::new();
     let ptt = PttManager::new(cfg.ptt_max_tx());
 
+    let mut winkeyer_endpoint = None;
     let winkeyer: Option<WinkeyerBrokerHandle> = if let Some(keyer) = &cfg.winkeyer {
         let port = open_winkeyer_serial(&keyer.port, keyer.baud)?;
         let port_name = keyer.port.clone();
@@ -287,9 +306,11 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
         let bind = keyer.api_bind.parse().map_err(|error| {
             CatHubError::Backend(format!("invalid WinKeyer API bind address: {error}"))
         })?;
-        let server = bind_winkeyer_server(bind, handle.clone())
+        let (address, server) = bind_winkeyer_server(bind, handle.clone())
             .await
             .map_err(|error| CatHubError::Backend(format!("cannot bind WinKeyer API: {error}")))?;
+        winkeyer_endpoint = Some(format!("http://{address}"));
+        tracing::info!(bind = %address, "WinKeyer broker API listening");
         tokio::spawn(async move {
             match server.await {
                 Ok(Err(error)) => tracing::error!(%error, "WinKeyer broker gRPC server stopped"),
@@ -443,6 +464,7 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
         );
     }
 
+    let mut hamlib_endpoints = Vec::with_capacity(cfg.hamlib_net.len());
     for ep in &cfg.hamlib_net {
         let id = next_id.fetch_add(1, Ordering::SeqCst);
         let template = ClientSessionContext::new(
@@ -454,16 +476,30 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
             caps.clone(),
         )
         .with_single_vfo(ep.single_vfo);
-        let bind = ep.bind.clone();
+        let listener = bind_hamlib_listener(&ep.bind).await?;
+        let address = listener.local_addr()?;
         let name = ep.name.clone();
         let ids = next_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_listener(&bind, ids, template).await {
+            if let Err(e) = run_listener(listener, ids, template).await {
                 tracing::error!(endpoint = %name, error = %e, "hamlib_net listener stopped");
             }
         });
-        tracing::info!(endpoint = %ep.name, bind = %ep.bind, "hamlib_net endpoint listening");
+        tracing::info!(endpoint = %ep.name, bind = %address, "hamlib_net endpoint listening");
+        hamlib_endpoints.push(HamlibEndpoint {
+            name: ep.name.clone(),
+            endpoint: address.to_string(),
+        });
     }
+
+    let _runtime_info_lease = if let Some(path) = cli.runtime_info.as_deref() {
+        Some(runtime_info::publish(
+            path,
+            &RuntimeInfo::new(winkeyer_endpoint, hamlib_endpoints),
+        )?)
+    } else {
+        None
+    };
 
     // PTT safety watchdog: a transmitter that exceeds the configured ceiling is unkeyed at
     // the radio first, then released, so the ceiling is a real stuck-transmitter backstop
@@ -659,6 +695,8 @@ mod tests {
         let cli = Cli {
             config: Some(path.clone()),
             section: None,
+            winkeyer_api_bind: None,
+            runtime_info: None,
             log: None,
             dry_run: true,
             command: None,
@@ -672,6 +710,8 @@ mod tests {
         let cli = Cli {
             config: Some(PathBuf::from("does-not-exist-cathub.toml")),
             section: None,
+            winkeyer_api_bind: None,
+            runtime_info: None,
             log: None,
             dry_run: true,
             command: None,
@@ -706,6 +746,8 @@ mod tests {
         let cli = Cli {
             config: Some(path.clone()),
             section: None,
+            winkeyer_api_bind: None,
+            runtime_info: None,
             log: None,
             dry_run: false,
             command: None,

@@ -23,6 +23,8 @@ async fn dry_run_accepts_a_valid_loopback_config() {
     let cli = Cli {
         config: Some(path.clone()),
         section: None,
+        winkeyer_api_bind: None,
+        runtime_info: None,
         log: None,
         dry_run: true,
         command: None,
@@ -41,6 +43,8 @@ async fn dry_run_rejects_an_invalid_backend() {
     let cli = Cli {
         config: Some(path.clone()),
         section: None,
+        winkeyer_api_bind: None,
+        runtime_info: None,
         log: None,
         dry_run: true,
         command: None,
@@ -54,6 +58,8 @@ async fn missing_config_is_an_error() {
     let cli = Cli {
         config: Some(PathBuf::from("definitely-missing-cathub-config.toml")),
         section: None,
+        winkeyer_api_bind: None,
+        runtime_info: None,
         log: None,
         dry_run: true,
         command: None,

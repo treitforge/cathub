@@ -187,29 +187,25 @@ impl WinkeyerBrokerService for Service {
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn run_server(
-    bind: SocketAddr,
-    broker: BrokerHandle,
-) -> Result<(), tonic::transport::Error> {
-    tonic::transport::Server::builder()
-        .add_service(WinkeyerBrokerServiceServer::new(Service::new(broker)))
-        .serve(bind)
-        .await
-}
-
 /// Bind the loopback endpoint before returning so daemon startup fails loudly on conflicts.
 pub(crate) async fn bind_server(
     bind: SocketAddr,
     broker: BrokerHandle,
-) -> std::io::Result<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>> {
+) -> std::io::Result<(
+    SocketAddr,
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+)> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    Ok(tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(WinkeyerBrokerServiceServer::new(Service::new(broker)))
-            .serve_with_incoming(TcpListenerStream::new(listener))
-            .await
-    }))
+    let address = listener.local_addr()?;
+    Ok((
+        address,
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(WinkeyerBrokerServiceServer::new(Service::new(broker)))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        }),
+    ))
 }
 
 #[allow(clippy::result_large_err)]
@@ -399,10 +395,11 @@ mod tests {
             .await
             .expect("initialization");
 
-        let reserved = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
-        let address = reserved.local_addr().expect("address");
-        drop(reserved);
-        let server = tokio::spawn(run_server(address, broker));
+        let (address, server) =
+            bind_server("127.0.0.1:0".parse().expect("dynamic bind address"), broker)
+                .await
+                .expect("bind server");
+        assert_ne!(address.port(), 0);
         let endpoint = format!("http://{address}");
         let mut client = loop {
             match crate::broker_proto::winkeyer_broker_service_client::WinkeyerBrokerServiceClient::connect(

@@ -659,16 +659,19 @@ where
 /// closed. Real rigctld commands are short; this only bounds a misbehaving client.
 const MAX_LINE_LEN: usize = 4096;
 
-/// Bind a Hamlib net endpoint and serve connections. Each connection gets a fresh
+/// Bind a Hamlib net endpoint before the daemon reports that it is ready.
+pub(crate) async fn bind_listener(bind: &str) -> std::io::Result<TcpListener> {
+    TcpListener::bind(bind).await
+}
+
+/// Serve connections from a bound Hamlib net endpoint. Each connection gets a fresh
 /// [`ClientSessionContext`] sharing the same state/radio/ptt but its own session id and the
 /// endpoint's permissions.
 pub(crate) async fn run_listener(
-    bind: &str,
+    listener: TcpListener,
     next_session_id: Arc<std::sync::atomic::AtomicU64>,
     template: ClientSessionContext,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(bind).await?;
-    tracing::info!(bind, "hamlib_net endpoint listening");
     loop {
         let (stream, peer) = listener.accept().await?;
         let session_id = next_session_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
