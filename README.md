@@ -23,7 +23,7 @@ The daemon leaves the station unkeyed after shutdown or a client failure.
 Install the daemon from crates.io with Rust 1.88 or newer:
 
 ```powershell
-cargo install cathub --version 0.1.1
+cargo install cathub --version 0.2.0
 ```
 
 You can also download the Windows or Linux archive from the

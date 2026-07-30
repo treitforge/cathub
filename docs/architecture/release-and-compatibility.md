@@ -31,7 +31,7 @@ Set the `NUGET_USER` Actions repository variable to the policy owner's NuGet use
 Then dispatch the publication workflow:
 
 ```powershell
-gh workflow run publish-registries.yml -f release_tag=v0.1.1
+gh workflow run publish-registries.yml -f release_tag=v0.2.0
 ```
 
 The workflow rejects a draft or prerelease.
@@ -57,12 +57,9 @@ The daemon crate depends on the same version of `cathub-protocol`.
 
 ## Wire compatibility
 
-The 0.1 typed WinKeyer API retains the legacy `qsoripper.services` protobuf package string
-so existing pre-release clients can connect. That string is a wire identifier, not a source
-or runtime dependency. Do not rename it in the 0.1 line.
-
-Introduce a future wire namespace as a new protocol version.
-Give clients an explicit migration period.
+The 0.2 typed WinKeyer API uses the CatHub-owned `cathub.services` protobuf package string.
+It is a public wire identifier. Renaming it is a breaking protocol change and requires a new
+major protocol version plus a client migration period.
 Request and response envelopes remain unique for each RPC.
 Protobuf 1-1-1 remains the default file layout.
 
