@@ -14,9 +14,8 @@ Use a unique request envelope and response envelope for each RPC.
 Run `buf lint`.
 Document compatibility.
 
-The 0.1 `qsoripper.services` wire-package identifier is a compatibility
-boundary. Do not rename it in place. Do not interpret it as a source
-dependency.
+The `cathub.services` wire-package identifier is part of the public contract.
+Changing it requires a new protocol major version and a client migration plan.
 
 An operator must attend all hardware transmission tests.
 Automated tests must not key a physical transmitter.

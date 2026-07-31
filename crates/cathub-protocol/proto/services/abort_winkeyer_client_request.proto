@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package qsoripper.services;
+package cathub.services;
 
-option csharp_namespace = "QsoRipper.Services";
+option csharp_namespace = "CatHub.Protocol";
 
 message WinkeyerBrokerServiceAbortClientRequest {
   string client_name = 1;
