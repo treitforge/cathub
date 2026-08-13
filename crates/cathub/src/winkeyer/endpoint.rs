@@ -460,6 +460,13 @@ fn synthesize_status(broker: &BrokerHandle, session_mode: SessionMode) -> u8 {
         | u8::from(snapshot.break_in) << 1
 }
 
+fn status_for_mode(raw: u8, session_mode: SessionMode) -> u8 {
+    match session_mode {
+        SessionMode::Wk1 => raw,
+        SessionMode::Wk2 | SessionMode::Wk3 => raw & !0x08,
+    }
+}
+
 fn event_byte(
     event: &BrokerEvent,
     broker: &BrokerHandle,
@@ -469,7 +476,9 @@ fn event_byte(
 ) -> Option<u8> {
     match event {
         BrokerEvent::SpeedPot { raw, .. } => Some(*raw),
-        BrokerEvent::Status { .. } => Some(synthesize_status(broker, session_mode)),
+        BrokerEvent::Status { raw } => Some(status_for_mode(*raw, session_mode)),
+        BrokerEvent::Completed { .. } => Some(0xc0),
+        BrokerEvent::Canceled { .. } => Some(synthesize_status(broker, session_mode)),
         BrokerEvent::Echo(byte) => {
             let snapshot = broker.snapshot();
             (snapshot.active_client_id == Some(client_id) || (primary && snapshot.break_in))
@@ -655,6 +664,59 @@ mod tests {
             .await
             .expect("physical F-key message");
         assert_eq!(physical, expected);
+    }
+
+    #[tokio::test]
+    async fn completed_typed_job_resynchronizes_two_virtual_clients() {
+        let (broker, _n1mm, _device) = setup().await;
+        broker.register(43, false).await.expect("third client");
+        broker
+            .register(1_000_000, false)
+            .await
+            .expect("typed client");
+        broker
+            .enqueue(1_000_000, b"E".to_vec(), None)
+            .await
+            .expect("send");
+        assert!(broker.snapshot().busy);
+        let completed = BrokerEvent::Completed {
+            job_id: 7,
+            client_id: 1_000_000,
+        };
+
+        assert_eq!(
+            event_byte(&completed, &broker, 42, true, SessionMode::Wk2),
+            Some(0xc0)
+        );
+        assert_eq!(
+            event_byte(&completed, &broker, 43, false, SessionMode::Wk2),
+            Some(0xc0)
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_idle_status_overrides_stale_busy_snapshot() {
+        let (broker, _n1mm, _device) = setup().await;
+        broker
+            .register(1_000_000, false)
+            .await
+            .expect("typed client");
+        broker
+            .enqueue(1_000_000, b"E".to_vec(), None)
+            .await
+            .expect("send");
+        assert!(broker.snapshot().busy);
+
+        assert_eq!(
+            event_byte(
+                &BrokerEvent::Status { raw: 0xc0 },
+                &broker,
+                42,
+                true,
+                SessionMode::Wk2,
+            ),
+            Some(0xc0)
+        );
     }
 
     #[tokio::test]

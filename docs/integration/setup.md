@@ -17,7 +17,7 @@ Put `cathub` or `cathub.exe` on `PATH`.
 If Rust 1.88 or newer is already installed, the equivalent installation from crates.io is:
 
 ```powershell
-cargo install cathub --version 0.2.0
+cargo install cathub --version 0.2.1
 ```
 
 To build from source instead:
