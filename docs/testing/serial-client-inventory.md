@@ -66,3 +66,4 @@ Add one row for each application trace or driver report.
 | Date | Profile | Environment | Evidence type | File or URL | Result | Notes |
 |---|---|---|---|---|---|---|
 | Not run | All | Not run | Planned | None | Pending | Phase 1 code and profiles exist. Application runs remain. |
+| 2026-08-14 | `n1mm-radio` | Windows development station | Readiness check | [N1MM PoC runbook](n1mm-radio-poc.md) | Blocked | N1MM and the station CatHub process held COM21/COM20. The alternate pair was also in use. No trace was captured and no evidence state changed. |

@@ -5,6 +5,7 @@ members = [
     "crates/cathub-protocol",
     "crates/cathub-virtual-serial",
 ]
+exclude = ["drivers/cathub-virtual-serial-umdf"]
 
 [workspace.package]
 version = "0.2.1"

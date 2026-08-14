@@ -1,0 +1,63 @@
+; CatHub pure Rust UMDF 2 proof-of-concept package.
+; This sample-class package does not expose a COM port yet.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Sample
+ClassGuid   = {78A1C341-4539-11d3-B88D-00C04FAD5171}
+Provider    = %ProviderString%
+CatalogFile = cathub_virtual_serial_umdf.cat
+PnpLockDown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskId1%,,,""
+
+[SourceDisksFiles]
+cathub_virtual_serial_umdf.dll = 1,,
+
+[ClassInstall32]
+AddReg=SampleClassReg
+
+[SampleClassReg]
+HKR,,,0,%ClassName%
+HKR,,Icon,,-5
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$.10.0...22000
+
+[Standard.NT$ARCH$.10.0...22000]
+%DeviceDesc%=CatHubUMDFDevice_Install, root\CATHUB_UMDF_POC
+
+[CatHubUMDFDevice_Install.NT]
+CopyFiles=DriverCopy
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+
+[DriverCopy]
+cathub_virtual_serial_umdf.dll
+
+[CatHubUMDFDevice_Install.NT.HW]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+
+[CatHubUMDFDevice_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[CatHubUMDFDevice_Install.NT.Wdf]
+UmdfService=cathub_virtual_serial_umdf, CatHubUMDFDevice_WdfInstall
+UmdfServiceOrder=cathub_virtual_serial_umdf
+
+[CatHubUMDFDevice_WdfInstall]
+UmdfLibraryVersion=$UMDFVERSION$
+ServiceBinary=%13%\cathub_virtual_serial_umdf.dll
+
+[Strings]
+ProviderString="CatHub contributors"
+ManufacturerName="CatHub contributors"
+DiskId1="CatHub UMDF proof-of-concept installation media"
+DeviceDesc="CatHub UMDF proof-of-concept device"
+ClassName="CatHub proof-of-concept devices"
