@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cathub",
     "crates/cathub-protocol",
+    "crates/cathub-virtual-serial",
 ]
 
 [workspace.package]

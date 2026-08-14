@@ -162,6 +162,8 @@ Registry publication is a separate authorized operation. See
 - [Architecture report](docs/architecture/index.html)
 - [Radio hub design](docs/design/multi-client-cat-hub.md)
 - [WinKeyer broker design](docs/design/winkeyer-broker.md)
+- [Virtual serial Phase 1](docs/design/virtual-serial-transport-phase-1.md)
+- [Serial client inventory](docs/testing/serial-client-inventory.md)
 - [Operator setup](docs/integration/setup.md)
 - [Release and compatibility](docs/architecture/release-and-compatibility.md)
 
