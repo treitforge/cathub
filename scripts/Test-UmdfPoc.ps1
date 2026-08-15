@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Check', 'Package')]
+    [ValidateSet('Check', 'ValidatePackage', 'Package')]
     [string]$Action = 'Check'
 )
 
@@ -15,19 +15,77 @@ function Assert-Command {
     }
 }
 
-function Assert-WdkHeaders {
+function Test-WdkContentRoot {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath (Join-Path $Path 'Include'))) {
+        return $false
+    }
+
+    return @(Get-ChildItem -LiteralPath (Join-Path $Path 'Include') -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'km\crt') }).Count -gt 0
+}
+
+function Find-WdkContentRoot {
+    if ($env:WDKContentRoot -and (Test-WdkContentRoot $env:WDKContentRoot)) {
+        return (Resolve-Path -LiteralPath $env:WDKContentRoot).Path
+    }
+
+    $packageRoot = Join-Path $env:LOCALAPPDATA 'CatHub\wdk\packages'
+    if (Test-Path -LiteralPath $packageRoot) {
+        $packagePrefix = 'Microsoft.Windows.WDK.x64.'
+        $packages = @(Get-ChildItem -LiteralPath $packageRoot -Directory |
+            Where-Object {
+                $_.Name.StartsWith($packagePrefix) -and (Test-WdkContentRoot (Join-Path $_.FullName 'c'))
+            } |
+            Sort-Object { [version]$_.Name.Substring($packagePrefix.Length) } -Descending)
+        if ($packages.Count -gt 0) {
+            return (Join-Path $packages[0].FullName 'c')
+        }
+    }
+
     $kitsRoot = (Get-ItemProperty `
         -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' `
         -ErrorAction SilentlyContinue).KitsRoot10
-    if (-not $kitsRoot) {
-        throw 'Windows Kits root is not registered. Install a supported Windows Driver Kit.'
+    if ($kitsRoot -and (Test-WdkContentRoot $kitsRoot)) {
+        return $kitsRoot
     }
 
-    $crtDirectories = @(Get-ChildItem -LiteralPath (Join-Path $kitsRoot 'Include') -Directory |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'km\crt') })
-    if ($crtDirectories.Count -eq 0) {
-        throw "The Windows SDK is present at '$kitsRoot', but WDK km/crt headers are missing."
+    throw @"
+No complete WDK was found. Install the pinned user-local package with:
+nuget install Microsoft.Windows.WDK.x64 -Version 10.0.28000.2526 -OutputDirectory `"$packageRoot`" -NonInteractive -DirectDownload -Source https://api.nuget.org/v3/index.json
+"@
+}
+
+function Add-PathEntry {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if ((Test-Path -LiteralPath $Path) -and ($env:Path -split ';' -notcontains $Path)) {
+        $env:Path = "$Path;$env:Path"
     }
+}
+
+function Initialize-WdkEnvironment {
+    $contentRoot = Find-WdkContentRoot
+    $versionDirectory = Get-ChildItem -LiteralPath (Join-Path $contentRoot 'Include') -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'km\crt') } |
+        Sort-Object { [version]$_.Name } -Descending |
+        Select-Object -First 1
+
+    $env:WDKContentRoot = $contentRoot
+    $binRoot = Join-Path $contentRoot "bin\$($versionDirectory.Name)"
+    $toolRoot = Join-Path $contentRoot "tools\$($versionDirectory.Name)"
+    if (Test-Path -LiteralPath $binRoot) {
+        $env:WDKBinRoot = $binRoot
+        Add-PathEntry (Join-Path $binRoot 'x86')
+        Add-PathEntry (Join-Path $binRoot 'x64')
+    }
+    if (Test-Path -LiteralPath $toolRoot) {
+        $env:WDKToolRoot = $toolRoot
+        Add-PathEntry (Join-Path $toolRoot 'x64')
+    }
+
+    Write-Host "Using WDK $($versionDirectory.Name) from '$contentRoot'."
 }
 
 function Invoke-Checked {
@@ -44,15 +102,25 @@ function Invoke-Checked {
 
 Assert-Command cargo
 Assert-Command clang
-Assert-WdkHeaders
+Initialize-WdkEnvironment
 
 Push-Location $driverRoot
 try {
     if ($Action -eq 'Package') {
-        foreach ($command in @('cargo-make', 'inf2cat', 'infverif', 'stampinf', 'signtool')) {
+        foreach ($command in @(
+                'cargo-make', 'inf2cat', 'infverif', 'stampinf', 'makecert', 'signtool'
+            )) {
             Assert-Command $command
         }
         Invoke-Checked cargo @('make', 'default', '--target', 'x86_64-pc-windows-msvc')
+    }
+    elseif ($Action -eq 'ValidatePackage') {
+        foreach ($command in @('cargo-make', 'inf2cat', 'infverif', 'stampinf')) {
+            Assert-Command $command
+        }
+        Invoke-Checked cargo @(
+            'make', 'package-unsigned', '--target', 'x86_64-pc-windows-msvc'
+        )
     }
     else {
         Invoke-Checked cargo @('fmt', '--all', '--', '--check')

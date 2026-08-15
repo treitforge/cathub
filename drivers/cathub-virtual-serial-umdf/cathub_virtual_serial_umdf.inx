@@ -1,10 +1,10 @@
 ; CatHub pure Rust UMDF 2 proof-of-concept package.
-; This sample-class package does not expose a COM port yet.
+; This private proof-of-concept class does not expose a COM port yet.
 
 [Version]
 Signature   = "$WINDOWS NT$"
-Class       = Sample
-ClassGuid   = {78A1C341-4539-11d3-B88D-00C04FAD5171}
+Class       = CatHubPoC
+ClassGuid   = {513D0917-B448-4C5D-ADBF-14E156572683}
 Provider    = %ProviderString%
 CatalogFile = cathub_virtual_serial_umdf.cat
 PnpLockDown = 1
@@ -19,9 +19,9 @@ DefaultDestDir = 13
 cathub_virtual_serial_umdf.dll = 1,,
 
 [ClassInstall32]
-AddReg=SampleClassReg
+AddReg=CatHubPoCClassReg
 
-[SampleClassReg]
+[CatHubPoCClassReg]
 HKR,,,0,%ClassName%
 HKR,,Icon,,-5
 

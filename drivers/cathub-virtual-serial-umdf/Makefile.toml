@@ -1,3 +1,5 @@
+extend = "target/rust-driver-makefile.toml"
+
 [config]
 min_version = "0.37.16"
 
@@ -11,3 +13,8 @@ load_script = '''
 
 wdk_build::cargo_make::load_rust_driver_makefile()?
 '''
+
+[tasks.package-unsigned]
+description = "Build and validate an unsigned driver package without creating a certificate"
+dependencies = ["copy-pdb-to-package", "copy-map-to-package", "inf2cat", "infverif"]
+workspace = false

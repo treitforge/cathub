@@ -7,7 +7,7 @@ Phase 1 defined the private framing contract and conformance harness.
 This milestone pins and scaffolds the pure Rust UMDF 2 binary before any device is installed.
 
 The scaffold is not a virtual COM driver yet.
-Its INF uses the Windows Sample class and the driver only calls `WdfDriverCreate` and
+Its INF uses a private CatHub proof-of-concept class and the driver only calls `WdfDriverCreate` and
 `WdfDeviceCreate`.
 Keeping the device non-serial prevents an incomplete driver from appearing usable to N1MM or
 another station application.
@@ -19,17 +19,19 @@ another station application.
 | Rust | `1.91.0` |
 | Target | `x86_64-pc-windows-msvc` |
 | `windows-drivers-rs` | `8e88dd899d9fa988df841e08cc01e9f663e5a415` |
+| WDK NuGet package | `10.0.28000.2526` |
+| SDK dependency | `10.0.28000.1721` |
 | Driver model | UMDF 2.33 |
 | Minimum Windows family | Windows 11 x64 |
 
 The Microsoft Rust driver repository is still experimental.
 CatHub therefore pins a commit instead of a branch or loose crate version.
-The driver is a separate workspace because the upstream build supports only one WDK configuration
-in a Cargo build graph.
+The driver is an excluded, standalone Cargo package because the upstream build supports only one
+WDK configuration in a Cargo build graph.
 
 ## Local environment audit
 
-Audit date: 2026-08-14.
+Audit date: 2026-08-15.
 
 Available on the development station:
 
@@ -37,16 +39,14 @@ Available on the development station:
 - LLVM/Clang 21.1.2
 - Visual Studio 2026 Build Tools and Visual Studio 2022
 - Windows SDK directories through 10.0.26100.0
+- User-local Microsoft WDK NuGet package 10.0.28000.2526 and SDK dependency 10.0.28000.1721
+- `cargo-make` 0.37.24 and `rust-script` 0.36.0
 - N1MM Logger+ and isolated com0com pairs including COM20/COM21
 
-Missing from the development station:
-
-- WDF headers such as `wdf.h`
-- WDK packaging tools `inf2cat`, `infverif`, and `stampinf`
-- `cargo-make`
-
-The SDK does provide `signtool`, but that does not make it a WDK environment.
-No driver, certificate, or additional tool was installed during this audit.
+The WDK package supplies the WDF headers and WDK validation/packaging tools without a machine-wide
+installation or administrator access. The driver compiles against that package, `Inf2Cat` reports
+zero signability errors or warnings, and `InfVerif` accepts the generated INF. No driver or
+certificate was installed during this audit; the validated package is unsigned.
 
 ## Microsoft sample inventory
 
@@ -112,8 +112,8 @@ Each of those categories must be added to this inventory when introduced.
 
 ## Gates before the INF becomes a Ports-class package
 
-1. Install a supported WDK in the isolated development environment.
-2. Build and package this sample-class driver with warnings treated as errors.
+1. Restore the pinned WDK package in the isolated development environment.
+2. Build and package this proof-of-concept-class driver with warnings treated as errors.
 3. Add device and queue contexts with typed accessors.
 4. Implement bounded application read/write queues, cancellation, cleanup, and timeout state.
 5. Register `GUID_DEVINTERFACE_COMPORT` and a private CatHub interface.

@@ -52,7 +52,7 @@ unsafe fn driver_entry_inner(driver: PDRIVER_OBJECT, registry_path: PCUNICODE_ST
             driver,
             registry_path,
             driver_attributes,
-            &mut driver_config,
+            &raw mut driver_config,
             driver_handle_output,
         )
     }
@@ -69,16 +69,16 @@ extern "C" fn evt_driver_device_add(
 }
 
 unsafe fn create_device(mut device_init: *mut WDFDEVICE_INIT) -> NTSTATUS {
-    let mut device = WDF_NO_HANDLE.cast::<WDFDEVICE>();
+    let mut device: WDFDEVICE = WDF_NO_HANDLE.cast();
 
     // SAFETY: WDF supplies `device_init`; this callback consumes it exactly once on success.
     // Null object attributes are allowed and `device` is a valid output location.
     unsafe {
         call_unsafe_wdf_function_binding!(
             WdfDeviceCreate,
-            &mut device_init,
+            &raw mut device_init,
             WDF_NO_OBJECT_ATTRIBUTES,
-            &mut device,
+            &raw mut device,
         )
     }
 }
