@@ -80,7 +80,10 @@ The proof-of-concept data plane currently provides:
 - fail-closed cleanup that clears buffered bytes and completes both sides' pending reads when
   either handle disconnects, with new reads and writes rejected until both peers reconnect.
 
-This is deliberately a single-device raw-byte proof of concept. It does not yet decode the shared
-private framing contract, implement serial timeouts or controls, restrict the daemon interface to a
-service SID, or expose a real application COM port. The INF stays in the private proof-of-concept
-class until those behaviors are implemented and verified on an isolated driver-development target.
+Each WDF device owns its transport state and pending-read queues through typed object context, and
+the context's destroy callback releases the Rust-owned state during device teardown.
+
+This remains a raw-byte proof of concept. It does not yet decode the shared private framing
+contract, implement serial timeouts or controls, restrict the daemon interface to a service SID, or
+expose a real application COM port. The INF stays in the private proof-of-concept class until those
+behaviors are implemented and verified on an isolated driver-development target.

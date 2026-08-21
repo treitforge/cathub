@@ -61,7 +61,7 @@ The source remains upstream; CatHub does not copy the C implementation.
 | Area | VirtualSerial2 behavior | CatHub PoC state |
 |---|---|---|
 | Driver | `DriverEntry`, `EVT_WDF_DRIVER_DEVICE_ADD` | Entry and device-add skeleton |
-| Device | Device context and cleanup callback | Cleanup implemented; typed per-device context remains planned |
+| Device | Device context and cleanup callback | Typed per-device context and destroy cleanup implemented |
 | Default queue | Parallel read, write, and device-control callbacks | Sequential proof-of-concept read/write queue implemented |
 | Pending reads | Manual queue | Two manual queues with cancellation and disconnect draining implemented |
 | Pending event wait | Separate manual queue | Planned, one outstanding wait policy required |
@@ -108,22 +108,23 @@ The unsafe surface remains isolated in one module, `src/interop.rs`:
 - file create and cleanup callbacks
 - private device-interface registration
 - default and manual queue creation
+- typed device-context registration, lookup, and destroy cleanup
 - request forwarding, retrieval, cancellation, and completion
 - conversion of WDF-owned request buffers and file names to bounded Rust slices
 - unload callback registration
 
 Every ABI entry catches panics.
 The raw slices never outlive their WDF request or file-object callback. Safe Rust owns the bounded
-byte buffers, exclusive-handle state, and application session sequence. The current process-global
-state supports the proof-of-concept's single root-enumerated device only; it must become typed
-per-device context before multi-device support.
+byte buffers, exclusive-handle state, application session sequence, and pending-read queue handles.
+Each device owns those values through typed WDF context; file and queue callbacks resolve their
+parent device before accessing the state.
 
 ## Gates before the INF becomes a Ports-class package
 
 1. Restore the pinned WDK package in the isolated development environment.
 2. Build and package this proof-of-concept-class driver with warnings treated as errors.
-3. Replace the single-device proof-of-concept state with device and queue contexts using typed
-   accessors.
+3. Keep endpoint state and queue handles in typed per-device context, resolving it from file and
+   queue callbacks.
 4. Extend the implemented bounded read/write, cancellation, and cleanup behavior with serial
    timeout state.
 5. Register `GUID_DEVINTERFACE_COMPORT` and a private CatHub interface.
