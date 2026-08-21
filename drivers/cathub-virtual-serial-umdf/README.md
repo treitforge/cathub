@@ -4,9 +4,10 @@ This isolated Cargo package proves the first build and ABI boundary for issue #6
 It is not part of the normal CatHub workspace because `windows-drivers-rs` supports one WDK
 configuration per Cargo build graph.
 
-The current driver creates a private proof-of-concept-class WDF device only.
-It does not register `GUID_DEVINTERFACE_COMPORT`, claim a COM number, or expose the private CatHub
-interface.
+The current driver creates a private proof-of-concept-class WDF device and registers two
+reference-named instances of private interface
+`{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`: `application` and `daemon`.
+It does not register `GUID_DEVINTERFACE_COMPORT` or claim a COM number.
 Do not install it on the working station.
 
 ## Pinned inputs
@@ -70,6 +71,16 @@ All Windows and WDF calls live in `src/interop.rs`.
 Every exported or registered callback catches Rust panics before they can unwind into WDF.
 The driver contains no kernel-mode CatHub code and no C or C++ shim.
 
-The next implementation step is the application COM interface and its bounded read/write queues.
-That work must land with cancellation and cleanup behavior; the INF stays in the Sample class until
-those behaviors exist.
+The proof-of-concept data plane currently provides:
+
+- one exclusive handle for each reference name;
+- independent 64 KiB bounded queues in both directions;
+- all-or-nothing writes, with overflow reported instead of truncation;
+- cancelable reads held in WDF manual queues when no data is available; and
+- fail-closed cleanup that clears buffered bytes and completes both sides' pending reads when
+  either handle disconnects, with new reads and writes rejected until both peers reconnect.
+
+This is deliberately a single-device raw-byte proof of concept. It does not yet decode the shared
+private framing contract, implement serial timeouts or controls, restrict the daemon interface to a
+service SID, or expose a real application COM port. The INF stays in the private proof-of-concept
+class until those behaviors are implemented and verified on an isolated driver-development target.

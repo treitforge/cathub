@@ -4,11 +4,13 @@
 
 This is the isolated proof-of-concept branch for issue #6.
 Phase 1 defined the private framing contract and conformance harness.
-This milestone pins and scaffolds the pure Rust UMDF 2 binary before any device is installed.
+This milestone pins the pure Rust UMDF 2 binary and adds its first private byte-transfer channel
+before any device is installed.
 
 The scaffold is not a virtual COM driver yet.
-Its INF uses a private CatHub proof-of-concept class and the driver only calls `WdfDriverCreate` and
-`WdfDeviceCreate`.
+Its INF uses a private CatHub proof-of-concept class. The driver registers `application` and
+`daemon` reference names under private interface
+`{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}` and transfers raw bytes between them.
 Keeping the device non-serial prevents an incomplete driver from appearing usable to N1MM or
 another station application.
 
@@ -59,9 +61,9 @@ The source remains upstream; CatHub does not copy the C implementation.
 | Area | VirtualSerial2 behavior | CatHub PoC state |
 |---|---|---|
 | Driver | `DriverEntry`, `EVT_WDF_DRIVER_DEVICE_ADD` | Entry and device-add skeleton |
-| Device | Device context and cleanup callback | Planned with endpoint state |
-| Default queue | Parallel read, write, and device-control callbacks | Planned |
-| Pending reads | Manual queue | Planned with bounded buffering and cancellation |
+| Device | Device context and cleanup callback | Cleanup implemented; typed per-device context remains planned |
+| Default queue | Parallel read, write, and device-control callbacks | Sequential proof-of-concept read/write queue implemented |
+| Pending reads | Manual queue | Two manual queues with cancellation and disconnect draining implemented |
 | Pending event wait | Separate manual queue | Planned, one outstanding wait policy required |
 | Cleanup | Device cleanup releases COM mapping | Planned with daemon detach and fail-safe revocation |
 
@@ -98,24 +100,32 @@ Those are CatHub requirements, not behaviors supplied by VirtualSerial2.
 
 ## Unsafe and FFI inventory
 
-The initial unsafe surface is one module, `src/interop.rs`:
+The unsafe surface remains isolated in one module, `src/interop.rs`:
 
 - exported `DriverEntry`
 - `WdfDriverCreate`
 - device-add callback and `WdfDeviceCreate`
+- file create and cleanup callbacks
+- private device-interface registration
+- default and manual queue creation
+- request forwarding, retrieval, cancellation, and completion
+- conversion of WDF-owned request buffers and file names to bounded Rust slices
 - unload callback registration
 
 Every ABI entry catches panics.
-There are no raw request buffers, context casts, ownership transfers, or asynchronous request races
-yet.
-Each of those categories must be added to this inventory when introduced.
+The raw slices never outlive their WDF request or file-object callback. Safe Rust owns the bounded
+byte buffers, exclusive-handle state, and application session sequence. The current process-global
+state supports the proof-of-concept's single root-enumerated device only; it must become typed
+per-device context before multi-device support.
 
 ## Gates before the INF becomes a Ports-class package
 
 1. Restore the pinned WDK package in the isolated development environment.
 2. Build and package this proof-of-concept-class driver with warnings treated as errors.
-3. Add device and queue contexts with typed accessors.
-4. Implement bounded application read/write queues, cancellation, cleanup, and timeout state.
+3. Replace the single-device proof-of-concept state with device and queue contexts using typed
+   accessors.
+4. Extend the implemented bounded read/write, cancellation, and cleanup behavior with serial
+   timeout state.
 5. Register `GUID_DEVINTERFACE_COMPORT` and a private CatHub interface.
 6. Add the COM mapping only after restart and removal are deterministic.
 7. Install only on the isolated test target with development-signing policy documented.
