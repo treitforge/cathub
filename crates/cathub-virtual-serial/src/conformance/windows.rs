@@ -7,10 +7,11 @@ use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Devices::Communication::{
-    BuildCommDCBW, ClearCommBreak, ClearCommError, EscapeCommFunction, GetCommState,
-    GetCommTimeouts, PurgeComm, SetCommBreak, SetCommMask, SetCommState, SetCommTimeouts,
-    WaitCommEvent, CLRDTR, CLRRTS, COMMTIMEOUTS, COMSTAT, DCB, EV_RXCHAR, NOPARITY, ONESTOPBIT,
-    PURGE_RXABORT, PURGE_RXCLEAR, SETDTR, SETRTS, TWOSTOPBITS,
+    BuildCommDCBW, ClearCommBreak, ClearCommError, EscapeCommFunction, GetCommMask,
+    GetCommModemStatus, GetCommProperties, GetCommState, GetCommTimeouts, PurgeComm, SetCommBreak,
+    SetCommMask, SetCommState, SetCommTimeouts, WaitCommEvent, CLRDTR, CLRRTS, COMMPROP,
+    COMMTIMEOUTS, COMSTAT, DCB, EV_RXCHAR, NOPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR,
+    PURGE_TXABORT, PURGE_TXCLEAR, SETDTR, SETRTS, TWOSTOPBITS,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GENERIC_READ,
@@ -279,7 +280,12 @@ fn purge_receive(
             "receive queue contains {after} bytes after purge"
         )));
     }
-    Ok(format!("purge removed {before} queued bytes"))
+    if unsafe { PurgeComm(application.handle(), PURGE_TXABORT | PURGE_TXCLEAR) } == 0 {
+        return Err(last_error("PurgeComm transmit"));
+    }
+    Ok(format!(
+        "receive purge removed {before} queued bytes and transmit purge completed"
+    ))
 }
 
 fn wait_comm_event(
@@ -290,6 +296,15 @@ fn wait_comm_event(
     let mut peer = Peer::open(peer_target)?;
     if unsafe { SetCommMask(application.handle(), EV_RXCHAR) } == 0 {
         return Err(last_error("SetCommMask"));
+    }
+    let mut configured_mask = 0_u32;
+    if unsafe { GetCommMask(application.handle(), &mut configured_mask) } == 0 {
+        return Err(last_error("GetCommMask"));
+    }
+    if configured_mask != EV_RXCHAR {
+        return Err(ConformanceError::InvalidResult(format!(
+            "GetCommMask returned 0x{configured_mask:08x}"
+        )));
     }
     let event = Event::new()?;
     let mut overlapped: OVERLAPPED = unsafe { zeroed() };
@@ -402,7 +417,13 @@ fn modem_control(application_port: &str) -> Result<String, ConformanceError> {
     if unsafe { ClearCommBreak(application.handle()) } == 0 {
         return Err(last_error("ClearCommBreak"));
     }
-    Ok("DTR, RTS, and break control requests completed".to_string())
+    let mut modem_status = 0_u32;
+    if unsafe { GetCommModemStatus(application.handle(), &mut modem_status) } == 0 {
+        return Err(last_error("GetCommModemStatus"));
+    }
+    Ok(format!(
+        "DTR, RTS, and break controls completed; modem status 0x{modem_status:08x}"
+    ))
 }
 
 fn queue_status(
@@ -412,6 +433,17 @@ fn queue_status(
     let application = Port::open(application_port, false)?;
     let mut peer = Peer::open(peer_target)?;
     set_timeout(application.handle(), 500)?;
+    let mut properties: COMMPROP = unsafe { zeroed() };
+    if unsafe { GetCommProperties(application.handle(), &mut properties) } == 0 {
+        return Err(last_error("GetCommProperties"));
+    }
+    let expected_capacity = u32::try_from(DRIVER_BUFFER_CAPACITY).unwrap_or(u32::MAX);
+    if properties.dwMaxRxQueue < expected_capacity || properties.dwMaxTxQueue < expected_capacity {
+        return Err(ConformanceError::InvalidResult(format!(
+            "GetCommProperties reported rx={} tx={} bytes",
+            properties.dwMaxRxQueue, properties.dwMaxTxQueue
+        )));
+    }
     peer.write_all(TEST_DATA)?;
     std::thread::sleep(Duration::from_millis(50));
     let depth = queue_depth(application.handle())?;
