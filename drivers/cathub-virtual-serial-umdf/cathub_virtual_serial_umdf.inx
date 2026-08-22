@@ -22,6 +22,11 @@ cathub_virtual_serial_umdf.dll = 1,,
 
 [Standard.NT$ARCH$.10.0...22000]
 %DeviceDesc%=CatHubUMDFDevice_Install, root\CATHUB_VIRTUAL_SERIAL
+%HdsdrDeviceDesc%=CatHubHdsdr_Install, root\CATHUB_HDSDR_CAT
+%N1mmCatDeviceDesc%=CatHubN1mmCat_Install, root\CATHUB_N1MM_CAT
+%ArcpDeviceDesc%=CatHubArcp_Install, root\CATHUB_ARCP590_CAT
+%N1mmWinkeyerDeviceDesc%=CatHubN1mmWinkeyer_Install, root\CATHUB_N1MM_WINKEYER
+%WktoolsDeviceDesc%=CatHubWktools_Install, root\CATHUB_WKTOOLS
 
 [CatHubUMDFDevice_Install.NT]
 CopyFiles=DriverCopy
@@ -32,7 +37,7 @@ Needs=WUDFRD.NT
 cathub_virtual_serial_umdf.dll
 
 [CatHubUMDFDevice_Install.NT.HW]
-AddReg=SetDeviceType_AddReg
+AddReg=SetDeviceType_AddReg,DefaultMetadata_AddReg
 Include=WUDFRD.inf
 Needs=WUDFRD.NT.HW
 
@@ -47,6 +52,111 @@ UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
 
+[CatHubHdsdr_Install.NT]
+CopyFiles=DriverCopy
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+
+[CatHubHdsdr_Install.NT.HW]
+AddReg=SetDeviceType_AddReg,HdsdrMetadata_AddReg
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+
+[CatHubHdsdr_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[CatHubHdsdr_Install.NT.Wdf]
+UmdfService=cathub_virtual_serial_umdf, CatHubUMDFDevice_WdfInstall
+UmdfServiceOrder=cathub_virtual_serial_umdf
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy=CannotUseFsContexts
+
+[CatHubN1mmCat_Install.NT]
+CopyFiles=DriverCopy
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+
+[CatHubN1mmCat_Install.NT.HW]
+AddReg=SetDeviceType_AddReg,N1mmCatMetadata_AddReg
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+
+[CatHubN1mmCat_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[CatHubN1mmCat_Install.NT.Wdf]
+UmdfService=cathub_virtual_serial_umdf, CatHubUMDFDevice_WdfInstall
+UmdfServiceOrder=cathub_virtual_serial_umdf
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy=CannotUseFsContexts
+
+[CatHubArcp_Install.NT]
+CopyFiles=DriverCopy
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+
+[CatHubArcp_Install.NT.HW]
+AddReg=SetDeviceType_AddReg,ArcpMetadata_AddReg
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+
+[CatHubArcp_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[CatHubArcp_Install.NT.Wdf]
+UmdfService=cathub_virtual_serial_umdf, CatHubUMDFDevice_WdfInstall
+UmdfServiceOrder=cathub_virtual_serial_umdf
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy=CannotUseFsContexts
+
+[CatHubN1mmWinkeyer_Install.NT]
+CopyFiles=DriverCopy
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+
+[CatHubN1mmWinkeyer_Install.NT.HW]
+AddReg=SetDeviceType_AddReg,N1mmWinkeyerMetadata_AddReg
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+
+[CatHubN1mmWinkeyer_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[CatHubN1mmWinkeyer_Install.NT.Wdf]
+UmdfService=cathub_virtual_serial_umdf, CatHubUMDFDevice_WdfInstall
+UmdfServiceOrder=cathub_virtual_serial_umdf
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy=CannotUseFsContexts
+
+[CatHubWktools_Install.NT]
+CopyFiles=DriverCopy
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+
+[CatHubWktools_Install.NT.HW]
+AddReg=SetDeviceType_AddReg,WktoolsMetadata_AddReg
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+
+[CatHubWktools_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[CatHubWktools_Install.NT.Wdf]
+UmdfService=cathub_virtual_serial_umdf, CatHubUMDFDevice_WdfInstall
+UmdfServiceOrder=cathub_virtual_serial_umdf
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy=CannotUseFsContexts
+
 [CatHubUMDFDevice_WdfInstall]
 UmdfLibraryVersion=$UMDFVERSION$
 ServiceBinary=%13%\cathub_virtual_serial_umdf.dll
@@ -54,8 +164,43 @@ ServiceBinary=%13%\cathub_virtual_serial_umdf.dll
 [SetDeviceType_AddReg]
 HKR,,DeviceType,0x10001,0x0000001b
 
+[DefaultMetadata_AddReg]
+HKR,,CatHubEndpointKind,0x10001,1
+HKR,,CatHubStableId,0x00000000,"cathub-default"
+HKR,,CatHubDisplayName,0x00000000,"CatHub Virtual Serial Port"
+
+[HdsdrMetadata_AddReg]
+HKR,,CatHubEndpointKind,0x10001,1
+HKR,,CatHubStableId,0x00000000,"hdsdr-cat"
+HKR,,CatHubDisplayName,0x00000000,"CatHub HDSDR CAT Port"
+
+[N1mmCatMetadata_AddReg]
+HKR,,CatHubEndpointKind,0x10001,1
+HKR,,CatHubStableId,0x00000000,"n1mm-cat"
+HKR,,CatHubDisplayName,0x00000000,"CatHub N1MM CAT Port"
+
+[ArcpMetadata_AddReg]
+HKR,,CatHubEndpointKind,0x10001,1
+HKR,,CatHubStableId,0x00000000,"arcp590-cat"
+HKR,,CatHubDisplayName,0x00000000,"CatHub ARCP-590 CAT Port"
+
+[N1mmWinkeyerMetadata_AddReg]
+HKR,,CatHubEndpointKind,0x10001,2
+HKR,,CatHubStableId,0x00000000,"n1mm-winkeyer"
+HKR,,CatHubDisplayName,0x00000000,"CatHub N1MM WinKeyer Port"
+
+[WktoolsMetadata_AddReg]
+HKR,,CatHubEndpointKind,0x10001,2
+HKR,,CatHubStableId,0x00000000,"wktools"
+HKR,,CatHubDisplayName,0x00000000,"CatHub WKTools Port"
+
 [Strings]
 ProviderString="CatHub contributors"
 ManufacturerName="CatHub contributors"
 DiskId1="CatHub virtual serial installation media"
 DeviceDesc="CatHub Virtual Serial Port"
+HdsdrDeviceDesc="CatHub HDSDR CAT Port"
+N1mmCatDeviceDesc="CatHub N1MM CAT Port"
+ArcpDeviceDesc="CatHub ARCP-590 CAT Port"
+N1mmWinkeyerDeviceDesc="CatHub N1MM WinKeyer Port"
+WktoolsDeviceDesc="CatHub WKTools Port"

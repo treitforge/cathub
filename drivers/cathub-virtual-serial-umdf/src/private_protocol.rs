@@ -62,9 +62,31 @@ enum ProtocolPhase {
     Ready,
 }
 
+/// Provisioned identity for one public COM device instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointMetadata {
+    /// Endpoint kind: 1 is CAT and 2 is `WinKeyer`.
+    pub kind: u16,
+    /// Stable identifier referenced by `CatHub` configuration.
+    pub stable_id: String,
+    /// Operator-facing endpoint description.
+    pub display_name: String,
+}
+
+impl Default for EndpointMetadata {
+    fn default() -> Self {
+        Self {
+            kind: ENDPOINT_KIND_CAT,
+            stable_id: ENDPOINT_STABLE_ID.to_owned(),
+            display_name: ENDPOINT_DISPLAY_NAME.to_owned(),
+        }
+    }
+}
+
 /// Protocol state owned by one driver device instance.
 #[derive(Debug)]
 pub struct DriverProtocol {
+    endpoint: EndpointMetadata,
     decoder: FrameDecoder,
     phase: ProtocolPhase,
     attached: bool,
@@ -82,7 +104,14 @@ impl DriverProtocol {
     /// Create a disconnected protocol endpoint.
     #[must_use]
     pub fn new() -> Self {
+        Self::for_endpoint(EndpointMetadata::default())
+    }
+
+    /// Create a disconnected protocol endpoint with a provisioned identity.
+    #[must_use]
+    pub fn for_endpoint(endpoint: EndpointMetadata) -> Self {
         Self {
+            endpoint,
             decoder: FrameDecoder::default(),
             phase: ProtocolPhase::AwaitHello,
             attached: false,
@@ -101,7 +130,8 @@ impl DriverProtocol {
     pub fn reset_daemon(&mut self) {
         let application_open = self.application_open;
         let application_session = self.application_session;
-        *self = Self::new();
+        let endpoint = self.endpoint.clone();
+        *self = Self::for_endpoint(endpoint);
         self.application_open = application_open;
         self.application_session = application_session;
     }
@@ -361,13 +391,13 @@ impl DriverProtocol {
         endpoint.endpoint_id = ENDPOINT_ID;
         endpoint
             .fields
-            .insert_u16(endpoint_field::KIND, ENDPOINT_KIND_CAT)?;
+            .insert_u16(endpoint_field::KIND, self.endpoint.kind)?;
         endpoint
             .fields
-            .insert_string(endpoint_field::STABLE_ID, ENDPOINT_STABLE_ID)?;
+            .insert_string(endpoint_field::STABLE_ID, &self.endpoint.stable_id)?;
         endpoint
             .fields
-            .insert_string(endpoint_field::DISPLAY_NAME, ENDPOINT_DISPLAY_NAME)?;
+            .insert_string(endpoint_field::DISPLAY_NAME, &self.endpoint.display_name)?;
         endpoint.fields.insert_u16(endpoint_field::ENABLED, 1)?;
         let complete = response_frame(MessageKind::DiscoverComplete, frame, true);
         Ok(vec![
@@ -656,6 +686,27 @@ mod tests {
         assert_eq!(
             output_frame(&attached[1]).kind,
             MessageKind::ApplicationOpen
+        );
+    }
+
+    #[test]
+    fn discovery_reports_provisioned_endpoint_identity() {
+        let mut protocol = DriverProtocol::for_endpoint(EndpointMetadata {
+            kind: 2,
+            stable_id: "n1mm-winkeyer".to_owned(),
+            display_name: "CatHub N1MM WinKeyer Port".to_owned(),
+        });
+        ingest_frame(&mut protocol, &hello(1));
+        let discovery = ingest_frame(&mut protocol, &Frame::new(MessageKind::Discover, 0, 2));
+        let endpoint = output_frame(&discovery[0]);
+        assert_eq!(endpoint.fields.require_u16(endpoint_field::KIND), Ok(2));
+        assert_eq!(
+            endpoint.fields.require_string(endpoint_field::STABLE_ID),
+            Ok("n1mm-winkeyer")
+        );
+        assert_eq!(
+            endpoint.fields.require_string(endpoint_field::DISPLAY_NAME),
+            Ok("CatHub N1MM WinKeyer Port")
         );
     }
 

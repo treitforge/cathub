@@ -25,7 +25,9 @@ use wdk_sys::{
 };
 
 use crate::data_plane::{ChannelRole, DEFAULT_BUFFER_CAPACITY, DataPlaneError, EndpointDataPlane};
-use crate::private_protocol::{DriverProtocol, DriverProtocolError, ProtocolOutput};
+use crate::private_protocol::{
+    DriverProtocol, DriverProtocolError, EndpointMetadata, ProtocolOutput,
+};
 use crate::serial::{
     SerialBaudRate, SerialChars, SerialCommProperties, SerialHandflow, SerialLineControl,
     SerialQueueSize, SerialState, SerialStateError, SerialStatus, SerialTimeouts, ioctl, purge,
@@ -44,6 +46,15 @@ const TRUE: BOOLEAN = 1;
 
 const DAEMON_REFERENCE: [u16; 7] = [100, 97, 101, 109, 111, 110, 0];
 const PORT_NAME_VALUE: [u16; 9] = [80, 111, 114, 116, 78, 97, 109, 101, 0];
+const ENDPOINT_KIND_VALUE: [u16; 19] = [
+    67, 97, 116, 72, 117, 98, 69, 110, 100, 112, 111, 105, 110, 116, 75, 105, 110, 100, 0,
+];
+const STABLE_ID_VALUE: [u16; 15] = [
+    67, 97, 116, 72, 117, 98, 83, 116, 97, 98, 108, 101, 73, 100, 0,
+];
+const DISPLAY_NAME_VALUE: [u16; 18] = [
+    67, 97, 116, 72, 117, 98, 68, 105, 115, 112, 108, 97, 121, 78, 97, 109, 101, 0,
+];
 const DOS_DEVICE_PREFIX: &[u16] = &[
     92, 68, 111, 115, 68, 101, 118, 105, 99, 101, 115, 92, 71, 108, 111, 98, 97, 108, 92,
 ];
@@ -86,12 +97,17 @@ struct PendingRead {
 }
 
 impl DeviceState {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::for_endpoint(EndpointMetadata::default())
+    }
+
+    fn for_endpoint(endpoint: EndpointMetadata) -> Self {
         let mut serial = SerialState::default();
         serial.set_modem_input(serial.modem_input());
         Self {
             channel: Mutex::new(ChannelState::new()),
-            protocol: Mutex::new(DriverProtocol::new()),
+            protocol: Mutex::new(DriverProtocol::for_endpoint(endpoint)),
             serial: Mutex::new(serial),
             application_reads: AtomicPtr::new(ptr::null_mut()),
             daemon_reads: AtomicPtr::new(ptr::null_mut()),
@@ -313,7 +329,9 @@ unsafe fn create_device(mut device_init: *mut WDFDEVICE_INIT) -> NTSTATUS {
     let Some(context) = (unsafe { device_context(device) }) else {
         return STATUS_UNSUCCESSFUL;
     };
-    let state = Box::into_raw(Box::new(DeviceState::new()));
+    // SAFETY: The live WDF device owns a queryable PnP instance registry key.
+    let endpoint = unsafe { read_endpoint_metadata(device) };
+    let state = Box::into_raw(Box::new(DeviceState::for_endpoint(endpoint)));
     // SAFETY: The context is exclusively initialized before queues or interfaces publish device.
     unsafe { (*context).state = state };
     // SAFETY: `state` remains owned by the WDF device context until its destroy callback.
@@ -467,6 +485,77 @@ unsafe fn register_interfaces(device: WDFDEVICE) -> NTSTATUS {
             &raw const daemon,
         )
     }
+}
+
+unsafe fn read_endpoint_metadata(device: WDFDEVICE) -> EndpointMetadata {
+    let mut metadata = EndpointMetadata::default();
+    let mut key: WDFKEY = ptr::null_mut();
+    // SAFETY: The device is live, null attributes are allowed, and output storage is valid.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceOpenRegistryKey,
+            device,
+            PLUGPLAY_REGKEY_DEVICE,
+            KEY_QUERY_VALUE,
+            WDF_NO_OBJECT_ATTRIBUTES,
+            &raw mut key,
+        )
+    };
+    if !nt_success(status) {
+        return metadata;
+    }
+
+    let mut kind = 0_u32;
+    let kind_name = unicode_string(&ENDPOINT_KIND_VALUE);
+    // SAFETY: The key is open and both the value name and output remain valid synchronously.
+    let kind_status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRegistryQueryULong,
+            key,
+            &raw const kind_name,
+            &raw mut kind,
+        )
+    };
+    if nt_success(kind_status) && matches!(kind, 1 | 2) {
+        metadata.kind = u16::try_from(kind).unwrap_or(1);
+    }
+    // SAFETY: The key remains open through both synchronous string queries.
+    if let Some(stable_id) = unsafe { query_registry_string(key, &STABLE_ID_VALUE) } {
+        metadata.stable_id = stable_id;
+    }
+    // SAFETY: The key remains open through this synchronous string query.
+    if let Some(display_name) = unsafe { query_registry_string(key, &DISPLAY_NAME_VALUE) } {
+        metadata.display_name = display_name;
+    }
+    // SAFETY: This driver owns the WDF registry-key handle returned above.
+    unsafe { call_unsafe_wdf_function_binding!(WdfRegistryClose, key) };
+    metadata
+}
+
+unsafe fn query_registry_string(key: WDFKEY, value: &[u16]) -> Option<String> {
+    let value_name = unicode_string(value);
+    let mut buffer = [0_u16; 128];
+    let mut output = unicode_string_buffer(&mut buffer);
+    // SAFETY: The key is open and both counted strings remain valid through the call.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRegistryQueryUnicodeString,
+            key,
+            &raw const value_name,
+            ptr::null_mut(),
+            &raw mut output,
+        )
+    };
+    if !nt_success(status) {
+        return None;
+    }
+    let units = usize::from(output.Length) / size_of::<u16>();
+    let value = String::from_utf16(buffer.get(..units)?)
+        .ok()?
+        .trim_matches('\0')
+        .trim()
+        .to_owned();
+    (!value.is_empty()).then_some(value)
 }
 
 unsafe fn create_com_symbolic_link(device: WDFDEVICE) -> NTSTATUS {
