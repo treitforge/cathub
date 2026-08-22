@@ -31,6 +31,17 @@ use crate::TEST_PEER_READY;
 const IO_WAIT_MS: u32 = 2_000;
 const TEST_DATA: &[u8] = b"CatHub serial conformance";
 const DRIVER_BUFFER_CAPACITY: usize = 64 * 1024;
+const DCB_FLOW_CONTROL_MASK: u32 = (1 << 2)
+    | (1 << 3)
+    | (3 << 4)
+    | (1 << 6)
+    | (1 << 7)
+    | (1 << 8)
+    | (1 << 9)
+    | (1 << 10)
+    | (1 << 11)
+    | (3 << 12)
+    | (1 << 14);
 
 #[derive(Clone, Copy)]
 enum PeerTarget<'a> {
@@ -323,9 +334,9 @@ fn serial_configuration(
 
     let winkeyer = matches!(profile.name, "n1mm-winkeyer" | "wktools");
     let command = if winkeyer {
-        "baud=1200 parity=N data=8 stop=2"
+        "baud=1200 parity=N data=8 stop=2 xon=on octs=on odsr=off dtr=on rts=hs"
     } else {
-        "baud=9600 parity=N data=8 stop=1"
+        "baud=9600 parity=N data=8 stop=1 xon=on octs=on odsr=off dtr=on rts=hs"
     };
     let mut proposed = original;
     let wide = wide(command);
@@ -348,13 +359,25 @@ fn serial_configuration(
             || observed.ByteSize != 8
             || observed.Parity != NOPARITY
             || observed.StopBits != expected_stop
+            || observed._bitfield & DCB_FLOW_CONTROL_MASK
+                != proposed._bitfield & DCB_FLOW_CONTROL_MASK
+            || observed.XonLim != proposed.XonLim
+            || observed.XoffLim != proposed.XoffLim
+            || observed.XonChar != proposed.XonChar
+            || observed.XoffChar != proposed.XoffChar
         {
             return Err(ConformanceError::InvalidResult(format!(
-                "observed format baud={} data={} parity={} stop={}",
-                observed.BaudRate, observed.ByteSize, observed.Parity, observed.StopBits
+                "observed format/flow baud={} data={} parity={} stop={} flags=0x{:08x}",
+                observed.BaudRate,
+                observed.ByteSize,
+                observed.Parity,
+                observed.StopBits,
+                observed._bitfield & DCB_FLOW_CONTROL_MASK
             )));
         }
-        Ok(format!("serial format accepted: {command}"))
+        Ok(format!(
+            "serial format and flow control accepted: {command}"
+        ))
     })();
 
     let _ = unsafe { SetCommState(application.handle(), &original) };
