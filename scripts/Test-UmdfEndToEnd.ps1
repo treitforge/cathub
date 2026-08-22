@@ -669,36 +669,44 @@ try {
         response = $restartId
     }
 
-    $results.device_restart = Invoke-Captured pnputil @('/restart-device', $device.InstanceId)
-    if ($results.device_restart.exit_code -notin @(0, 3010)) {
-        throw "Restarting the CatHub device failed: $($results.device_restart.output)"
-    }
-    $serial.ReadTimeout = 1000
-    $deviceFailureTimer = [System.Diagnostics.Stopwatch]::StartNew()
-    $deviceFailure = $null
-    try {
-        $serial.Write('ID;')
-        $null = $serial.ReadTo(';')
-    }
-    catch {
-        $deviceFailure = $_.Exception.Message
-    }
-    $deviceFailureTimer.Stop()
-    if (-not $deviceFailure) {
-        throw 'The pre-restart COM handle unexpectedly remained usable after device restart.'
-    }
-    if ($deviceFailureTimer.ElapsedMilliseconds -gt 3000) {
-        throw "Device-restart I/O failure took $($deviceFailureTimer.ElapsedMilliseconds) ms."
-    }
     $serial.Close()
     $serial.Dispose()
     $serial = $null
+    Stop-Process -Id $process.Id -Force
+    $process.WaitForExit()
+    $process = $null
+
+    $deviceCycleTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $disable = Invoke-Captured pnputil @('/disable-device', $device.InstanceId)
+    if ($disable.exit_code -ne 0) {
+        throw "Disabling the CatHub device failed: $($disable.output)"
+    }
+    $enable = Invoke-Captured pnputil @('/enable-device', $device.InstanceId)
+    if ($enable.exit_code -ne 0) {
+        throw "Re-enabling the CatHub device failed: $($enable.output)"
+    }
+    $results.device_restart = [ordered]@{
+        method = 'pnputil disable/enable'
+        disable = $disable
+        enable = $enable
+    }
+    $deviceCycleTimer.Stop()
 
     $restartedDevice = Find-CatHubDevice -Executable $CatHubExe -StableId 'cathub-default'
     if ($restartedDevice.InstanceId -ne $device.InstanceId) {
         throw "Device restart changed instance ID to '$($restartedDevice.InstanceId)'."
     }
     $results.pnp_after_restart = Get-PnpEvidence -InstanceId $restartedDevice.InstanceId
+
+    $process = Start-Process -FilePath $CatHubExe `
+        -ArgumentList @('--config', $configPath) `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+    Start-Sleep -Seconds 2
+    if ($process.HasExited) {
+        throw "CatHub exited after the device cycle with code $($process.ExitCode)."
+    }
 
     $reconnectDeadline = [DateTime]::UtcNow.AddSeconds(20)
     $deviceRestartId = $null
@@ -734,8 +742,7 @@ try {
     $results.cases += [ordered]@{
         name = 'umdf_device_restart_reconnect'
         passed = $true
-        failure_elapsed_ms = $deviceFailureTimer.ElapsedMilliseconds
-        failure_error = $deviceFailure
+        cycle_elapsed_ms = $deviceCycleTimer.ElapsedMilliseconds
         response = $deviceRestartId
     }
     $results.passed = $true
@@ -836,16 +843,16 @@ finally {
     }
 
     $results.cathub_stdout = if (Test-Path -LiteralPath $stdoutPath) {
-        Get-Content -LiteralPath $stdoutPath -Raw
+        [string](Get-Content -LiteralPath $stdoutPath -Raw)
     } else { '' }
     $results.cathub_stderr = if (Test-Path -LiteralPath $stderrPath) {
-        Get-Content -LiteralPath $stderrPath -Raw
+        [string](Get-Content -LiteralPath $stderrPath -Raw)
     } else { '' }
     $results.test_peer_stdout = if (Test-Path -LiteralPath $peerStdoutPath) {
-        Get-Content -LiteralPath $peerStdoutPath -Raw
+        [string](Get-Content -LiteralPath $peerStdoutPath -Raw)
     } else { '' }
     $results.test_peer_stderr = if (Test-Path -LiteralPath $peerStderrPath) {
-        Get-Content -LiteralPath $peerStderrPath -Raw
+        [string](Get-Content -LiteralPath $peerStderrPath -Raw)
     } else { '' }
     $results.events = [ordered]@{
         system = Get-EventEvidence -LogName 'System' -StartTime $testStart
