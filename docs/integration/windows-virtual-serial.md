@@ -62,6 +62,12 @@ Apply stages the package, creates only hardware IDs from CatHub's fixed allow-li
 requested COM numbers, installs or restarts the device, and verifies the resulting PnP state. It is
 idempotent: a second successful run reports retained endpoints and makes no changes.
 
+Provisioning also records the invoking Windows user's SID as the private-channel owner. The COM
+port remains usable by ordinary desktop serial clients, but the driver accepts the private
+`cathub.exe` channel only when UMDF can impersonate a request from that owner. Run `apply` again as
+the intended service user to transfer private-channel ownership; the plan reports this as an
+`AUTHORIZE` action. Normal daemon and application operation does not require elevation.
+
 Remove every CatHub-owned endpoint, or select stable IDs individually:
 
 ```powershell

@@ -124,6 +124,7 @@ mod platform {
     use std::fs::{File, OpenOptions};
     use std::io::{self, Read, Write};
     use std::mem::{offset_of, size_of};
+    use std::os::windows::fs::OpenOptionsExt;
     use std::ptr::{null, null_mut};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -141,6 +142,7 @@ mod platform {
     use windows_sys::Win32::Foundation::{
         GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, INVALID_HANDLE_VALUE,
     };
+    use windows_sys::Win32::Storage::FileSystem::{SECURITY_IMPERSONATION, SECURITY_SQOS_PRESENT};
 
     const PRIVATE_INTERFACE: GUID = GUID {
         data1: 0x0084_BDDE,
@@ -189,7 +191,11 @@ mod platform {
     }
 
     fn connect_path(path: &str, stable_id: &str, expected_kind: u16) -> io::Result<Worker> {
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION)
+            .open(path)?;
         let mut protocol = DaemonProtocol::new();
 
         write_frame(

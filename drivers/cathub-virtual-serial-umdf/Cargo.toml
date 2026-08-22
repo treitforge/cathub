@@ -24,6 +24,7 @@ wdk-build = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e
 cathub-virtual-serial = { path = "../../crates/cathub-virtual-serial", default-features = false }
 wdk = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
 wdk-sys = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security"] }
 
 [dev-dependencies]
 wdk-sys = { features = ["test-stubs"], git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }

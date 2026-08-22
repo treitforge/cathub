@@ -87,6 +87,7 @@ pub(crate) struct InstalledEndpoint {
     instance_id: String,
     display_name: String,
     com_port: Option<String>,
+    authorized_for_current_user: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -115,6 +116,11 @@ pub(crate) enum ProvisionAction {
         instance_id: String,
         from: Option<String>,
         to: String,
+    },
+    Authorize {
+        stable_id: String,
+        instance_id: String,
+        com_port: String,
     },
     Retain {
         stable_id: String,
@@ -181,6 +187,9 @@ impl TextReport for StatusReport {
                 endpoint.instance_id,
                 endpoint.display_name
             ));
+            if !endpoint.authorized_for_current_user {
+                lines.push("    Private daemon access requires owner reconciliation.".to_string());
+            }
         }
         if self.owned_endpoints.is_empty() {
             lines.push("  No CatHub-owned devices are installed.".to_string());
@@ -224,6 +233,11 @@ impl TextReport for ProvisionPlan {
                     instance_id,
                     com_port,
                 } => format!("  RETAIN {stable_id} as {com_port} ({instance_id})"),
+                ProvisionAction::Authorize {
+                    stable_id,
+                    instance_id,
+                    com_port,
+                } => format!("  AUTHORIZE {stable_id} on {com_port} ({instance_id})"),
             };
             lines.push(line);
         }
@@ -481,9 +495,22 @@ fn plan_from_snapshot(
                 if installed_endpoint
                     .com_port
                     .as_ref()
-                    .is_some_and(|port| port.eq_ignore_ascii_case(&endpoint.com_port)) =>
+                    .is_some_and(|port| port.eq_ignore_ascii_case(&endpoint.com_port))
+                    && installed_endpoint.authorized_for_current_user =>
             {
                 actions.push(ProvisionAction::Retain {
+                    stable_id: endpoint.stable_id.clone(),
+                    instance_id: installed_endpoint.instance_id.clone(),
+                    com_port: endpoint.com_port.clone(),
+                });
+            }
+            Some(installed_endpoint)
+                if installed_endpoint
+                    .com_port
+                    .as_ref()
+                    .is_some_and(|port| port.eq_ignore_ascii_case(&endpoint.com_port)) =>
+            {
+                actions.push(ProvisionAction::Authorize {
                     stable_id: endpoint.stable_id.clone(),
                     instance_id: installed_endpoint.instance_id.clone(),
                     com_port: endpoint.com_port.clone(),
@@ -553,12 +580,17 @@ mod platform {
         SPDRP_HARDWAREID, SP_DEVINFO_DATA,
     };
     use windows_sys::Win32::Foundation::{
-        GetLastError, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS,
+        INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE,
         KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_SZ,
     };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
 
     use super::{
@@ -569,6 +601,7 @@ mod platform {
     const COM_NAME_ARBITER: &str = r"SYSTEM\CurrentControlSet\Control\COM Name Arbiter";
     const COM_DATABASE_VALUE: &str = "ComDB";
     const PORT_NAME_VALUE: &str = "PortName";
+    const OWNER_SID_VALUE: &str = "CatHubOwnerSid";
     const MAX_COM_PORTS: usize = 4096;
 
     type HComDb = *mut c_void;
@@ -671,6 +704,7 @@ mod platform {
 
     pub(super) fn snapshot() -> Result<SystemSnapshot, String> {
         let set = DeviceInfoSet::all()?;
+        let current_sid = current_user_sid()?;
         let mut owned = Vec::new();
         let mut claims = Vec::new();
         let mut live_ports = BTreeSet::new();
@@ -703,6 +737,7 @@ mod platform {
                 });
             }
             if let Some(definition) = definition {
+                let owner_sid = device_binary_value(set.0, &data, OWNER_SID_VALUE);
                 let display_name = device_property_strings(set.0, &data, SPDRP_FRIENDLYNAME)
                     .into_iter()
                     .next()
@@ -719,6 +754,8 @@ mod platform {
                     instance_id,
                     display_name,
                     com_port: port,
+                    authorized_for_current_user: owner_sid.as_deref()
+                        == Some(current_sid.as_slice()),
                 });
             }
         }
@@ -756,6 +793,7 @@ mod platform {
             )));
         }
         let database = ComDatabase::open()?;
+        let owner_sid = current_user_sid()?;
         for action in &plan.actions {
             match action {
                 ProvisionAction::Create {
@@ -774,6 +812,7 @@ mod platform {
                         definition.hardware_id,
                         definition.display_name,
                         com_port,
+                        &owner_sid,
                         inf_path,
                         &mut reboot_required,
                     ) {
@@ -788,13 +827,16 @@ mod platform {
                     ..
                 } => {
                     database.claim(to)?;
-                    if let Err(error) = set_existing_port(instance_id, to) {
+                    if let Err(error) = set_existing_port(instance_id, to, &owner_sid) {
                         let _ = database.release(to);
                         return Err(error);
                     }
                     if let Some(from) = from {
                         database.release(from)?;
                     }
+                }
+                ProvisionAction::Authorize { instance_id, .. } => {
+                    set_existing_owner(instance_id, &owner_sid)?;
                 }
                 ProvisionAction::Retain { .. } => {}
             }
@@ -842,6 +884,7 @@ mod platform {
         hardware_id: &str,
         display_name: &str,
         com_port: &str,
+        owner_sid: &[u8],
         inf_path: &Path,
         reboot_required: &mut i32,
     ) -> Result<(), String> {
@@ -890,6 +933,7 @@ mod platform {
         }
         let result = (|| {
             set_port_name(set.0, &data, com_port)?;
+            set_owner_sid(set.0, &data, owner_sid)?;
             let hardware_id = wide(hardware_id);
             let inf = wide(&inf_path.to_string_lossy());
             // SAFETY: Both input strings are NUL-terminated and the reboot output is valid.
@@ -916,10 +960,28 @@ mod platform {
         result
     }
 
-    fn set_existing_port(instance_id: &str, com_port: &str) -> Result<(), String> {
+    fn set_existing_port(
+        instance_id: &str,
+        com_port: &str,
+        owner_sid: &[u8],
+    ) -> Result<(), String> {
         with_device(instance_id, |set, data| {
             set_port_name(set, data, com_port)?;
+            set_owner_sid(set, data, owner_sid)?;
             // SAFETY: The data belongs to the live set and identifies the exact CatHub instance.
+            if unsafe { SetupDiRestartDevices(set, data) } == 0 {
+                return Err(last_error(&format!(
+                    "restarting CatHub device `{instance_id}`"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn set_existing_owner(instance_id: &str, owner_sid: &[u8]) -> Result<(), String> {
+        with_device(instance_id, |set, data| {
+            set_owner_sid(set, data, owner_sid)?;
+            // SAFETY: Restart makes the driver reload the updated owner SID.
             if unsafe { SetupDiRestartDevices(set, data) } == 0 {
                 return Err(last_error(&format!(
                     "restarting CatHub device `{instance_id}`"
@@ -975,6 +1037,48 @@ mod platform {
         result
     }
 
+    fn set_owner_sid(
+        set: HDEVINFO,
+        data: &SP_DEVINFO_DATA,
+        owner_sid: &[u8],
+    ) -> Result<(), String> {
+        // SAFETY: The device data belongs to the live information set.
+        let key = unsafe {
+            SetupDiOpenDevRegKey(set, data, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_SET_VALUE)
+        };
+        if key as isize == INVALID_HANDLE_VALUE as isize {
+            return Err(last_error(
+                "opening the CatHub device security registry key",
+            ));
+        }
+        let name = wide(OWNER_SID_VALUE);
+        let length = u32::try_from(owner_sid.len())
+            .map_err(|_| "the current user's SID is too large".to_string());
+        let result = length.and_then(|length| {
+            // SAFETY: The key is open and the copied SID bytes remain valid through the call.
+            let status = unsafe {
+                RegSetValueExW(
+                    key,
+                    name.as_ptr(),
+                    0,
+                    REG_BINARY,
+                    owner_sid.as_ptr(),
+                    length,
+                )
+            };
+            if status == ERROR_SUCCESS {
+                Ok(())
+            } else {
+                Err(format!(
+                    "setting CatHubOwnerSid failed with Win32 error {status}"
+                ))
+            }
+        });
+        // SAFETY: This function owns the registry handle returned above.
+        unsafe { RegCloseKey(key) };
+        result
+    }
+
     fn device_port_name(set: HDEVINFO, data: &SP_DEVINFO_DATA) -> Option<String> {
         // SAFETY: The device data belongs to the live information set.
         let key =
@@ -986,6 +1090,53 @@ mod platform {
         // SAFETY: This function owns the registry handle returned above.
         unsafe { RegCloseKey(key) };
         value
+    }
+
+    fn device_binary_value(set: HDEVINFO, data: &SP_DEVINFO_DATA, name: &str) -> Option<Vec<u8>> {
+        // SAFETY: The device data belongs to the live information set.
+        let key =
+            unsafe { SetupDiOpenDevRegKey(set, data, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ) };
+        if key as isize == INVALID_HANDLE_VALUE as isize {
+            return None;
+        }
+        let name = wide(name);
+        let mut kind = 0;
+        let mut bytes = 0;
+        // SAFETY: Null data performs a size query on the open key.
+        let status = unsafe {
+            RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                null(),
+                &raw mut kind,
+                null_mut(),
+                &raw mut bytes,
+            )
+        };
+        let mut value = if status == ERROR_SUCCESS && kind == REG_BINARY && bytes > 0 {
+            vec![0_u8; usize::try_from(bytes).ok()?]
+        } else {
+            Vec::new()
+        };
+        if !value.is_empty() {
+            // SAFETY: The byte buffer matches the registry-reported size.
+            let status = unsafe {
+                RegQueryValueExW(
+                    key,
+                    name.as_ptr(),
+                    null(),
+                    &raw mut kind,
+                    value.as_mut_ptr(),
+                    &raw mut bytes,
+                )
+            };
+            if status != ERROR_SUCCESS {
+                value.clear();
+            }
+        }
+        // SAFETY: This function owns the registry handle returned above.
+        unsafe { RegCloseKey(key) };
+        (!value.is_empty()).then_some(value)
     }
 
     fn query_registry_string(key: HKEY, name: &str) -> Option<String> {
@@ -1165,6 +1316,59 @@ mod platform {
             .to_string())
     }
 
+    fn current_user_sid() -> Result<Vec<u8>, String> {
+        let mut token = null_mut();
+        // SAFETY: The pseudo-process handle is valid and output storage receives an owned token.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+            return Err(last_error("opening the current process token"));
+        }
+        let result = (|| {
+            let mut bytes = 0;
+            // SAFETY: Null output requests the token-user buffer size.
+            unsafe {
+                GetTokenInformation(token, TokenUser, null_mut(), 0, &raw mut bytes);
+            }
+            // SAFETY: GetLastError immediately follows the expected size-query failure.
+            if bytes == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+                return Err(last_error("querying the current user SID length"));
+            }
+            let mut buffer = vec![
+                0_u8;
+                usize::try_from(bytes)
+                    .map_err(|_| "the current user token is too large")?
+            ];
+            // SAFETY: The buffer has the exact size requested by GetTokenInformation.
+            if unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    bytes,
+                    &raw mut bytes,
+                )
+            } == 0
+            {
+                return Err(last_error("reading the current user SID"));
+            }
+            // SAFETY: TOKEN_USER is the documented leading structure in this returned buffer.
+            let token_user = unsafe { (buffer.as_ptr().cast::<TOKEN_USER>()).read_unaligned() };
+            // SAFETY: The SID pointer belongs to the live token-information buffer.
+            let sid_length = unsafe { GetLengthSid(token_user.User.Sid) };
+            let sid_length =
+                usize::try_from(sid_length).map_err(|_| "the current user SID is too large")?;
+            if sid_length == 0 {
+                return Err(last_error("validating the current user SID"));
+            }
+            // SAFETY: GetLengthSid returned the byte length of this SID in the live buffer.
+            Ok(unsafe {
+                std::slice::from_raw_parts(token_user.User.Sid.cast::<u8>(), sid_length).to_vec()
+            })
+        })();
+        // SAFETY: This function owns the process token handle.
+        unsafe { CloseHandle(token) };
+        result
+    }
+
     fn require_administrator() -> Result<(), String> {
         // SAFETY: This parameterless shell helper checks membership in the local Administrators group.
         if unsafe { IsUserAnAdmin() } == 0 {
@@ -1327,6 +1531,7 @@ dialect = "ts590"
                 instance_id: r"ROOT\CATHUB_N1MM_CAT\0000".to_string(),
                 display_name: "CatHub N1MM CAT Port".to_string(),
                 com_port: Some("COM21".to_string()),
+                authorized_for_current_user: true,
             }],
             claims: vec![PortClaim {
                 com_port: "COM21".to_string(),
@@ -1337,6 +1542,43 @@ dialect = "ts590"
         let plan = plan_from_snapshot(desired_endpoints(&config).unwrap(), &snapshot).unwrap();
         assert!(plan.is_applicable());
         assert!(!plan.requires_changes());
+    }
+
+    #[test]
+    fn installed_endpoint_with_another_owner_is_reauthorized() {
+        let config = config(
+            r#"
+[radio]
+backend = "loopback"
+[[serial_endpoint]]
+name = "n1mm"
+virtual_endpoint = "n1mm-cat"
+application_transport = "COM21"
+dialect = "ts590"
+"#,
+        );
+        let snapshot = SystemSnapshot {
+            owned: vec![InstalledEndpoint {
+                stable_id: "n1mm-cat".to_string(),
+                kind: EndpointKind::Cat,
+                hardware_id: r"ROOT\CATHUB_N1MM_CAT".to_string(),
+                instance_id: r"ROOT\CATHUB_N1MM_CAT\0000".to_string(),
+                display_name: "CatHub N1MM CAT Port".to_string(),
+                com_port: Some("COM21".to_string()),
+                authorized_for_current_user: false,
+            }],
+            claims: vec![PortClaim {
+                com_port: "COM21".to_string(),
+                owner: r"ROOT\CATHUB_N1MM_CAT\0000".to_string(),
+                cathub_owned: true,
+            }],
+        };
+        let plan = plan_from_snapshot(desired_endpoints(&config).unwrap(), &snapshot).unwrap();
+        assert!(matches!(
+            plan.actions.first(),
+            Some(ProvisionAction::Authorize { .. })
+        ));
+        assert!(plan.requires_changes());
     }
 
     #[test]

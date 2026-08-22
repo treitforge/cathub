@@ -15,14 +15,16 @@ use std::{
 
 use wdk::println;
 use wdk_sys::{
-    _WDF_EXECUTION_LEVEL, _WDF_FILEOBJECT_CLASS, _WDF_IO_QUEUE_DISPATCH_TYPE,
-    _WDF_SYNCHRONIZATION_SCOPE, _WDF_TRI_STATE, BOOLEAN, GUID, KEY_QUERY_VALUE, NTSTATUS,
-    PCUNICODE_STRING, PDRIVER_OBJECT, PLUGPLAY_REGKEY_DEVICE, PVOID, ULONG, ULONG_PTR,
-    UNICODE_STRING, WDF_DRIVER_CONFIG, WDF_FILEOBJECT_CONFIG, WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE,
-    WDF_NO_OBJECT_ATTRIBUTES, WDF_OBJECT_ATTRIBUTES, WDF_OBJECT_CONTEXT_TYPE_INFO,
-    WDF_TIMER_CONFIG, WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER, WDFFILEOBJECT, WDFKEY, WDFOBJECT,
-    WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER, call_unsafe_wdf_function_binding,
+    _SECURITY_IMPERSONATION_LEVEL, _WDF_EXECUTION_LEVEL, _WDF_FILEOBJECT_CLASS,
+    _WDF_IO_QUEUE_DISPATCH_TYPE, _WDF_SYNCHRONIZATION_SCOPE, _WDF_TRI_STATE, BOOLEAN, GUID,
+    KEY_QUERY_VALUE, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, PLUGPLAY_REGKEY_DEVICE, PVOID,
+    ULONG, ULONG_PTR, UNICODE_STRING, WDF_DRIVER_CONFIG, WDF_FILEOBJECT_CONFIG,
+    WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, WDF_OBJECT_ATTRIBUTES,
+    WDF_OBJECT_CONTEXT_TYPE_INFO, WDF_TIMER_CONFIG, WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER,
+    WDFFILEOBJECT, WDFKEY, WDFOBJECT, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER,
+    call_unsafe_wdf_function_binding,
 };
+use windows_sys::Win32::Security::{CheckTokenMembership, GetLengthSid, IsValidSid};
 
 use crate::data_plane::{ChannelRole, DEFAULT_BUFFER_CAPACITY, DataPlaneError, EndpointDataPlane};
 use crate::private_protocol::{
@@ -37,6 +39,7 @@ const STATUS_SUCCESS: NTSTATUS = 0;
 const STATUS_UNSUCCESSFUL: NTSTATUS = -1_073_741_823;
 const STATUS_INVALID_DEVICE_REQUEST: NTSTATUS = -1_073_741_808;
 const STATUS_INVALID_PARAMETER: NTSTATUS = -1_073_741_811;
+const STATUS_ACCESS_DENIED: NTSTATUS = -1_073_741_790;
 const STATUS_OBJECT_NAME_INVALID: NTSTATUS = -1_073_741_773;
 const STATUS_SHARING_VIOLATION: NTSTATUS = -1_073_741_757;
 const STATUS_DEVICE_NOT_CONNECTED: NTSTATUS = -1_073_741_667;
@@ -54,6 +57,9 @@ const STABLE_ID_VALUE: [u16; 15] = [
 ];
 const DISPLAY_NAME_VALUE: [u16; 18] = [
     67, 97, 116, 72, 117, 98, 68, 105, 115, 112, 108, 97, 121, 78, 97, 109, 101, 0,
+];
+const OWNER_SID_VALUE: [u16; 15] = [
+    67, 97, 116, 72, 117, 98, 79, 119, 110, 101, 114, 83, 105, 100, 0,
 ];
 const DOS_DEVICE_PREFIX: &[u16] = &[
     92, 68, 111, 115, 68, 101, 118, 105, 99, 101, 115, 92, 71, 108, 111, 98, 97, 108, 92,
@@ -88,6 +94,7 @@ struct DeviceState {
     daemon_reads: AtomicPtr<WDFQUEUE__>,
     wait_requests: AtomicPtr<WDFQUEUE__>,
     pending_application_reads: Mutex<VecDeque<PendingRead>>,
+    daemon_owner_sid: Box<[u8]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,10 +106,10 @@ struct PendingRead {
 impl DeviceState {
     #[cfg(test)]
     fn new() -> Self {
-        Self::for_endpoint(EndpointMetadata::default())
+        Self::for_endpoint(EndpointMetadata::default(), Box::default())
     }
 
-    fn for_endpoint(endpoint: EndpointMetadata) -> Self {
+    fn for_endpoint(endpoint: EndpointMetadata, daemon_owner_sid: Box<[u8]>) -> Self {
         let mut serial = SerialState::default();
         serial.set_modem_input(serial.modem_input());
         Self {
@@ -113,6 +120,7 @@ impl DeviceState {
             daemon_reads: AtomicPtr::new(ptr::null_mut()),
             wait_requests: AtomicPtr::new(ptr::null_mut()),
             pending_application_reads: Mutex::new(VecDeque::new()),
+            daemon_owner_sid,
         }
     }
 
@@ -330,8 +338,11 @@ unsafe fn create_device(mut device_init: *mut WDFDEVICE_INIT) -> NTSTATUS {
         return STATUS_UNSUCCESSFUL;
     };
     // SAFETY: The live WDF device owns a queryable PnP instance registry key.
-    let endpoint = unsafe { read_endpoint_metadata(device) };
-    let state = Box::into_raw(Box::new(DeviceState::for_endpoint(endpoint)));
+    let (endpoint, daemon_owner_sid) = unsafe { read_endpoint_metadata(device) };
+    let state = Box::into_raw(Box::new(DeviceState::for_endpoint(
+        endpoint,
+        daemon_owner_sid,
+    )));
     // SAFETY: The context is exclusively initialized before queues or interfaces publish device.
     unsafe { (*context).state = state };
     // SAFETY: `state` remains owned by the WDF device context until its destroy callback.
@@ -487,7 +498,7 @@ unsafe fn register_interfaces(device: WDFDEVICE) -> NTSTATUS {
     }
 }
 
-unsafe fn read_endpoint_metadata(device: WDFDEVICE) -> EndpointMetadata {
+unsafe fn read_endpoint_metadata(device: WDFDEVICE) -> (EndpointMetadata, Box<[u8]>) {
     let mut metadata = EndpointMetadata::default();
     let mut key: WDFKEY = ptr::null_mut();
     // SAFETY: The device is live, null attributes are allowed, and output storage is valid.
@@ -502,7 +513,7 @@ unsafe fn read_endpoint_metadata(device: WDFDEVICE) -> EndpointMetadata {
         )
     };
     if !nt_success(status) {
-        return metadata;
+        return (metadata, Box::default());
     }
 
     let mut kind = 0_u32;
@@ -527,9 +538,13 @@ unsafe fn read_endpoint_metadata(device: WDFDEVICE) -> EndpointMetadata {
     if let Some(display_name) = unsafe { query_registry_string(key, &DISPLAY_NAME_VALUE) } {
         metadata.display_name = display_name;
     }
+    // SAFETY: The key remains open through this bounded synchronous binary query.
+    let owner_sid = unsafe { query_registry_binary(key, &OWNER_SID_VALUE, 128) }
+        .unwrap_or_default()
+        .into_boxed_slice();
     // SAFETY: This driver owns the WDF registry-key handle returned above.
     unsafe { call_unsafe_wdf_function_binding!(WdfRegistryClose, key) };
-    metadata
+    (metadata, owner_sid)
 }
 
 unsafe fn query_registry_string(key: WDFKEY, value: &[u16]) -> Option<String> {
@@ -556,6 +571,43 @@ unsafe fn query_registry_string(key: WDFKEY, value: &[u16]) -> Option<String> {
         .trim()
         .to_owned();
     (!value.is_empty()).then_some(value)
+}
+
+unsafe fn query_registry_binary(key: WDFKEY, value: &[u16], maximum: usize) -> Option<Vec<u8>> {
+    let value_name = unicode_string(value);
+    let mut required_u32 = 0_u32;
+    let mut value_type = 0_u32;
+    // SAFETY: A zero-length query retrieves the value size and type synchronously.
+    let _status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRegistryQueryValue,
+            key,
+            &raw const value_name,
+            0,
+            ptr::null_mut(),
+            &raw mut required_u32,
+            &raw mut value_type,
+        )
+    };
+    let required = usize::try_from(required_u32).ok()?;
+    if required == 0 || required > maximum || value_type != 3 {
+        return None;
+    }
+    let mut buffer = vec![0_u8; required];
+    let length = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: The buffer matches the size returned by the first query and remains live.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRegistryQueryValue,
+            key,
+            &raw const value_name,
+            length,
+            buffer.as_mut_ptr().cast(),
+            &raw mut required_u32,
+            &raw mut value_type,
+        )
+    };
+    (nt_success(status) && value_type == 3).then_some(buffer)
 }
 
 unsafe fn create_com_symbolic_link(device: WDFDEVICE) -> NTSTATUS {
@@ -626,6 +678,12 @@ unsafe extern "C" fn evt_device_file_create(
         let Some(role) = (unsafe { role_from_file(file) }) else {
             return RequestDisposition::error(STATUS_OBJECT_NAME_INVALID);
         };
+        if role == ChannelRole::Daemon
+            // SAFETY: The create request is live and the immutable SID belongs to device state.
+            && !unsafe { daemon_request_is_authorized(request, &state.daemon_owner_sid) }
+        {
+            return RequestDisposition::error(STATUS_ACCESS_DENIED);
+        }
         let open_result = state.channel().open(role, file);
         match open_result {
             Ok(session) => {
@@ -657,6 +715,52 @@ unsafe extern "C" fn evt_device_file_create(
     .unwrap_or_else(|_| RequestDisposition::error(STATUS_UNSUCCESSFUL));
     // SAFETY: WDF transfers ownership of the create request to this callback.
     unsafe { finish_request(request, disposition) };
+}
+
+struct MembershipContext {
+    sid: *mut c_void,
+    checked: i32,
+    member: i32,
+}
+
+unsafe fn daemon_request_is_authorized(request: WDFREQUEST, owner_sid: &[u8]) -> bool {
+    if owner_sid.is_empty() {
+        return false;
+    }
+    let sid = owner_sid.as_ptr().cast_mut().cast();
+    // SAFETY: The SID pointer refers to the bounded registry value owned by device state.
+    if unsafe { IsValidSid(sid) } == 0
+        // SAFETY: IsValidSid accepted this pointer, so querying its encoded length is valid.
+        || usize::try_from(unsafe { GetLengthSid(sid) }).ok() != Some(owner_sid.len())
+    {
+        return false;
+    }
+    let mut context = MembershipContext {
+        sid,
+        checked: 0,
+        member: 0,
+    };
+    // SAFETY: WDF invokes the callback synchronously while the stack context and SID are live.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRequestImpersonate,
+            request,
+            _SECURITY_IMPERSONATION_LEVEL::SecurityImpersonation,
+            Some(evt_check_daemon_membership),
+            (&raw mut context).cast(),
+        )
+    };
+    nt_success(status) && context.checked != 0 && context.member != 0
+}
+
+unsafe extern "C" fn evt_check_daemon_membership(_request: WDFREQUEST, context: PVOID) {
+    // SAFETY: WDF passes the live stack context supplied to WdfRequestImpersonate.
+    let Some(context) = (unsafe { context.cast::<MembershipContext>().as_mut() }) else {
+        return;
+    };
+    // SAFETY: WDF impersonates the requestor for this callback and the SID storage is live.
+    context.checked =
+        unsafe { CheckTokenMembership(ptr::null_mut(), context.sid, &raw mut context.member) };
 }
 
 unsafe extern "C" fn evt_file_cleanup(file: WDFFILEOBJECT) {

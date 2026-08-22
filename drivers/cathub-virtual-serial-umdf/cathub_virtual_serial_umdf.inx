@@ -160,6 +160,7 @@ UmdfFsContextUsePolicy=CannotUseFsContexts
 [CatHubUMDFDevice_WdfInstall]
 UmdfLibraryVersion=$UMDFVERSION$
 ServiceBinary=%13%\cathub_virtual_serial_umdf.dll
+UmdfImpersonationLevel=Impersonation
 
 [SetDeviceType_AddReg]
 HKR,,DeviceType,0x10001,0x0000001b
