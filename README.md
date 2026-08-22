@@ -167,6 +167,7 @@ Registry publication is a separate authorized operation. See
 - [Serial client inventory](docs/testing/serial-client-inventory.md)
 - [Operator setup](docs/integration/setup.md)
 - [Windows CatHub-owned virtual serial](docs/integration/windows-virtual-serial.md)
+- [Virtual serial signing decision](docs/design/virtual-serial-signing-decision.md)
 - [Release and compatibility](docs/architecture/release-and-compatibility.md)
 
 ## License

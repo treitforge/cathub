@@ -90,4 +90,6 @@ catalog without installing that certificate on the build workstation:
 
 The resulting package is suitable only for the isolated VM procedure in
 `scripts/Test-UmdfEndToEnd.ps1`. Production distribution still requires the approved public
-catalog-signing path and clean-system Secure Boot/Memory Integrity acceptance evidence.
+catalog-signing path and clean-system Secure Boot/Memory Integrity acceptance evidence. See the
+[signing decision gate](../design/virtual-serial-signing-decision.md) for the current provider
+research and required acceptance record.
