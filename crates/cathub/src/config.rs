@@ -139,7 +139,11 @@ pub(crate) struct SerialEndpointConfig {
     /// A label for logging.
     pub(crate) name: String,
     /// The serial port this endpoint listens on (a com0com / tty path).
+    #[serde(default)]
     pub(crate) transport: String,
+    /// Stable endpoint identifier exposed by the CatHub UMDF driver.
+    #[serde(default)]
+    pub(crate) virtual_endpoint: Option<String>,
     /// The paired endpoint opened by the client application. The hub never opens it.
     #[serde(default)]
     pub(crate) application_transport: Option<String>,
@@ -224,7 +228,11 @@ pub(crate) struct WinkeyerEndpointConfig {
     /// Stable endpoint name used in logs and ownership status.
     pub(crate) name: String,
     /// Hub side of the virtual serial pair.
+    #[serde(default)]
     pub(crate) transport: String,
+    /// Stable endpoint identifier exposed by the CatHub UMDF driver.
+    #[serde(default)]
+    pub(crate) virtual_endpoint: Option<String>,
     /// Paired endpoint opened by the client application. The hub never opens it.
     #[serde(default)]
     pub(crate) application_transport: Option<String>,
@@ -365,6 +373,12 @@ impl Config {
             }
         }
         for endpoint in &self.serial_endpoint {
+            validate_endpoint_transport(
+                "serial endpoint",
+                &endpoint.name,
+                &endpoint.transport,
+                endpoint.virtual_endpoint.as_deref(),
+            )?;
             if endpoint
                 .application_transport
                 .as_deref()
@@ -459,7 +473,8 @@ impl Config {
         let mut transports = std::collections::BTreeSet::new();
         for endpoint in &self.winkeyer_endpoint {
             validate_winkeyer_endpoint(endpoint)?;
-            let normalized = endpoint.transport.to_ascii_uppercase();
+            let normalized =
+                endpoint_transport_key(&endpoint.transport, endpoint.virtual_endpoint.as_deref());
             if !transports.insert(normalized) {
                 return Err(ConfigError::Invalid(
                     "winkeyer endpoint transports must be distinct".to_string(),
@@ -512,9 +527,10 @@ impl Config {
         for endpoint in &self.serial_endpoint {
             let _ = writeln!(
                 out,
-                "serial_endpoint: name={} transport={} baud={} dialect={} perms={:?} single_vfo={}",
+                "serial_endpoint: name={} transport={} virtual_endpoint={} baud={} dialect={} perms={:?} single_vfo={}",
                 endpoint.name,
                 endpoint.transport,
+                endpoint.virtual_endpoint.as_deref().unwrap_or("(none)"),
                 endpoint.baud,
                 endpoint.dialect,
                 endpoint.perms,
@@ -538,7 +554,16 @@ impl Config {
                 self.radio.port
             );
             for endpoint in &self.serial_endpoint {
-                if let Some(application_transport) = endpoint.application_transport.as_deref() {
+                if let Some(stable_id) = endpoint.virtual_endpoint.as_deref() {
+                    let _ = writeln!(
+                        out,
+                        "  - {name}: managed COM endpoint {stable_id}, {dialect} dialect; use its Windows-assigned COM port.",
+                        name = endpoint.name,
+                        dialect = endpoint.dialect,
+                    );
+                } else if let Some(application_transport) =
+                    endpoint.application_transport.as_deref()
+                {
                     let _ = writeln!(
                         out,
                         "  - {name}: hub={hub}, application={application}, {dialect} dialect, {baud} baud.",
@@ -584,9 +609,10 @@ impl Config {
         for endpoint in &self.winkeyer_endpoint {
             let _ = writeln!(
                 out,
-                "winkeyer_endpoint: name={} hub_transport={} application_transport={} baud={} primary={} perms={:?}",
+                "winkeyer_endpoint: name={} hub_transport={} virtual_endpoint={} application_transport={} baud={} primary={} perms={:?}",
                 endpoint.name,
                 endpoint.transport,
+                endpoint.virtual_endpoint.as_deref().unwrap_or("(none)"),
                 endpoint.application_transport.as_deref().unwrap_or("(not recorded)"),
                 endpoint.baud,
                 endpoint.primary,
@@ -707,12 +733,12 @@ fn backup_path(path: &std::path::Path) -> PathBuf {
 }
 
 fn validate_winkeyer_endpoint(endpoint: &WinkeyerEndpointConfig) -> Result<(), ConfigError> {
-    if endpoint.transport.trim().is_empty() {
-        return Err(ConfigError::Invalid(format!(
-            "winkeyer endpoint '{}' requires transport",
-            endpoint.name
-        )));
-    }
+    validate_endpoint_transport(
+        "winkeyer endpoint",
+        &endpoint.name,
+        &endpoint.transport,
+        endpoint.virtual_endpoint.as_deref(),
+    )?;
     if endpoint.baud != 1_200 {
         return Err(ConfigError::Invalid(format!(
             "winkeyer endpoint '{}' baud must be 1200",
@@ -766,10 +792,80 @@ fn validate_winkeyer_endpoint(endpoint: &WinkeyerEndpointConfig) -> Result<(), C
     Ok(())
 }
 
+fn validate_endpoint_transport(
+    kind: &str,
+    name: &str,
+    transport: &str,
+    virtual_endpoint: Option<&str>,
+) -> Result<(), ConfigError> {
+    let has_transport = !transport.trim().is_empty();
+    let has_virtual_endpoint = virtual_endpoint.is_some_and(|value| !value.trim().is_empty());
+    if has_transport == has_virtual_endpoint {
+        return Err(ConfigError::Invalid(format!(
+            "{kind} '{name}' requires exactly one of transport or virtual_endpoint"
+        )));
+    }
+    Ok(())
+}
+
+fn endpoint_transport_key(transport: &str, virtual_endpoint: Option<&str>) -> String {
+    virtual_endpoint.map_or_else(
+        || format!("serial:{}", transport.trim().to_ascii_uppercase()),
+        |stable_id| format!("managed:{}", stable_id.trim().to_ascii_lowercase()),
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_managed_virtual_serial_endpoint() {
+        let config = Config::parse(
+            r#"
+[radio]
+backend = "loopback"
+
+[[serial_endpoint]]
+name = "managed-cat"
+virtual_endpoint = "cathub-default"
+dialect = "ts590"
+perms = ["read", "write"]
+"#,
+        )
+        .expect("managed endpoint should parse");
+
+        assert_eq!(
+            config.serial_endpoint[0].virtual_endpoint.as_deref(),
+            Some("cathub-default")
+        );
+        assert!(config.serial_endpoint[0].transport.is_empty());
+        assert!(config
+            .describe()
+            .contains("managed COM endpoint cathub-default"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_virtual_serial_transport() {
+        let error = Config::parse(
+            r#"
+[radio]
+backend = "loopback"
+
+[[serial_endpoint]]
+name = "ambiguous"
+transport = "COM20"
+virtual_endpoint = "cathub-default"
+dialect = "ts590"
+"#,
+        )
+        .expect_err("two transport selectors must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("requires exactly one of transport or virtual_endpoint"));
+    }
 
     const SAMPLE: &str = r#"
 [radio]

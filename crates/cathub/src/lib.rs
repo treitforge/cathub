@@ -25,6 +25,7 @@ mod error;
 mod events;
 mod hamlib_net;
 mod logging;
+mod managed_virtual_serial;
 mod model;
 mod permissions;
 mod ptt;
@@ -69,6 +70,7 @@ use crate::serial_endpoint::{open_serial, run_endpoint_session};
 use crate::state::StateHandle;
 use crate::winkeyer::{
     bind_server as bind_winkeyer_server, open_serial_endpoint as open_winkeyer_endpoint,
+    run_managed_endpoint as run_managed_winkeyer_endpoint,
     run_serial_endpoint as run_winkeyer_endpoint, spawn_supervised as spawn_winkeyer,
     BrokerHandle as WinkeyerBrokerHandle, EndpointPermissions as WinkeyerEndpointPermissions,
 };
@@ -420,48 +422,108 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     if let Some(keyer) = &winkeyer {
         for endpoint in &cfg.winkeyer_endpoint {
             let id = next_id.fetch_add(1, Ordering::SeqCst);
-            let port = open_winkeyer_endpoint(&endpoint.transport, endpoint.baud)?;
             let handle = keyer.clone();
             let primary = endpoint.primary;
             let permissions = WinkeyerEndpointPermissions::from_tokens(&endpoint.perms);
-            tokio::spawn(run_winkeyer_endpoint(
-                port,
-                handle,
-                id,
-                primary,
-                permissions,
-            ));
-            tracing::info!(
-                endpoint = %endpoint.name,
-                id,
-                hub_port = %endpoint.transport,
-                primary,
-                "virtual WinKeyer endpoint listening; point the application at the paired port"
-            );
+            if let Some(stable_id) = endpoint.virtual_endpoint.clone() {
+                let name = endpoint.name.clone();
+                tracing::info!(endpoint = %name, id, %stable_id, primary, "managed WinKeyer endpoint listening");
+                tokio::spawn(async move {
+                    loop {
+                        match managed_virtual_serial::open(&stable_id, 2).await {
+                            Ok(transport) => {
+                                tracing::info!(endpoint = %name, id, %stable_id, "managed WinKeyer application connected");
+                                run_managed_winkeyer_endpoint(
+                                    transport,
+                                    handle.clone(),
+                                    id,
+                                    primary,
+                                    permissions,
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                tracing::warn!(endpoint = %name, %stable_id, %error, "managed WinKeyer endpoint unavailable; retrying");
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                });
+            } else {
+                let port = open_winkeyer_endpoint(&endpoint.transport, endpoint.baud)?;
+                tokio::spawn(run_winkeyer_endpoint(
+                    port,
+                    handle,
+                    id,
+                    primary,
+                    permissions,
+                ));
+                tracing::info!(
+                    endpoint = %endpoint.name,
+                    id,
+                    hub_port = %endpoint.transport,
+                    primary,
+                    "virtual WinKeyer endpoint listening; point the application at the paired port"
+                );
+            }
         }
     }
 
     for endpoint in &cfg.serial_endpoint {
         let dialect = dialect_for(&endpoint.dialect)?;
         let id = next_id.fetch_add(1, Ordering::SeqCst);
-        let ctx = ClientSessionContext::new(
-            id,
-            endpoint.permissions(),
-            state.clone(),
-            radio.clone(),
-            ptt.clone(),
-            caps.clone(),
-        )
-        .with_single_vfo(endpoint.single_vfo);
-        let port = open_serial(&endpoint.name, &endpoint.transport, endpoint.baud)?;
-        tokio::spawn(run_endpoint_session(port, dialect, ctx, b';'));
-        tracing::info!(
-            endpoint = %endpoint.name,
-            id,
-            hub_port = %endpoint.transport,
-            "serial endpoint listening; hub owns this port -- point the application at the paired \
-             com0com port, not this one"
-        );
+        if let Some(stable_id) = endpoint.virtual_endpoint.clone() {
+            let name = endpoint.name.clone();
+            tracing::info!(endpoint = %name, id, %stable_id, "managed CAT endpoint listening");
+            let permissions = endpoint.permissions();
+            let single_vfo = endpoint.single_vfo;
+            let state = state.clone();
+            let radio = radio.clone();
+            let ptt = ptt.clone();
+            let caps = caps.clone();
+            tokio::spawn(async move {
+                loop {
+                    match managed_virtual_serial::open(&stable_id, 1).await {
+                        Ok(transport) => {
+                            tracing::info!(endpoint = %name, id, %stable_id, "managed CAT application connected");
+                            let ctx = ClientSessionContext::new(
+                                id,
+                                permissions,
+                                state.clone(),
+                                radio.clone(),
+                                ptt.clone(),
+                                caps.clone(),
+                            )
+                            .with_single_vfo(single_vfo);
+                            run_endpoint_session(transport, dialect.clone(), ctx, b';').await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(endpoint = %name, %stable_id, %error, "managed CAT endpoint unavailable; retrying");
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            });
+        } else {
+            let ctx = ClientSessionContext::new(
+                id,
+                endpoint.permissions(),
+                state.clone(),
+                radio.clone(),
+                ptt.clone(),
+                caps.clone(),
+            )
+            .with_single_vfo(endpoint.single_vfo);
+            let port = open_serial(&endpoint.name, &endpoint.transport, endpoint.baud)?;
+            tokio::spawn(run_endpoint_session(port, dialect, ctx, b';'));
+            tracing::info!(
+                endpoint = %endpoint.name,
+                id,
+                hub_port = %endpoint.transport,
+                "serial endpoint listening; hub owns this port -- point the application at the paired \
+                 com0com port, not this one"
+            );
+        }
     }
 
     let mut hamlib_endpoints = Vec::with_capacity(cfg.hamlib_net.len());

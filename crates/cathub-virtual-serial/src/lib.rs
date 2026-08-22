@@ -7,4 +7,5 @@
 
 #[cfg(feature = "conformance")]
 pub mod conformance;
+pub mod daemon;
 pub mod protocol;

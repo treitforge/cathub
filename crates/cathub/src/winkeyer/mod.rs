@@ -11,5 +11,7 @@ mod grpc;
 mod protocol;
 
 pub(crate) use actor::{spawn_supervised, BrokerHandle};
-pub(crate) use endpoint::{open_serial_endpoint, run_serial_endpoint, EndpointPermissions};
+pub(crate) use endpoint::{
+    open_serial_endpoint, run_managed_endpoint, run_serial_endpoint, EndpointPermissions,
+};
 pub(crate) use grpc::bind_server;

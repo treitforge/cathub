@@ -184,6 +184,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cathub-protocol",
+ "cathub-virtual-serial",
  "clap",
  "serde",
  "serde_json",
@@ -197,6 +198,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
