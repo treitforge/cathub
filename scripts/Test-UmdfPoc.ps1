@@ -184,6 +184,56 @@ function New-EphemeralDriverCertificate {
     }
 }
 
+function Write-PackageManifest {
+    param(
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)][string]$CertificatePath
+    )
+
+    $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $CertificatePath
+    )
+    try {
+        $files = @(Get-ChildItem -LiteralPath $PackageRoot -File |
+            Where-Object Name -ne 'package-manifest.json' |
+            Sort-Object Name |
+            ForEach-Object {
+                [ordered]@{
+                    name = $_.Name
+                    length = $_.Length
+                    sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                }
+            })
+        $manifest = [ordered]@{
+            schema_version = 1
+            generated_at_utc = [DateTime]::UtcNow.ToString('o')
+            package = 'cathub-virtual-serial-umdf'
+            architecture = 'x86_64-pc-windows-msvc'
+            git_revision = (& git -C $driverRoot rev-parse HEAD).Trim()
+            rustc = (& rustc --version).Trim()
+            windows_drivers_rs_revision = '8e88dd899d9fa988df841e08cc01e9f663e5a415'
+            wdk_nuget = 'Microsoft.Windows.WDK.x64 10.0.28000.2526'
+            umdf = '2.33'
+            signing = [ordered]@{
+                purpose = 'isolated development test only'
+                subject = $certificate.Subject
+                thumbprint = $certificate.Thumbprint
+                not_after_utc = $certificate.NotAfter.ToUniversalTime().ToString('o')
+            }
+            files = $files
+        }
+        $json = $manifest | ConvertTo-Json -Depth 6
+        [System.IO.File]::WriteAllText(
+            (Join-Path $PackageRoot 'package-manifest.json'),
+            $json,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+    }
+    finally {
+        $certificate.Dispose()
+    }
+}
+
 Assert-Command cargo
 Assert-Command clang
 Initialize-WdkEnvironment
@@ -203,6 +253,10 @@ try {
             'target\x86_64-pc-windows-msvc\debug\cathub_virtual_serial_umdf_package'
         $catalogPath = Join-Path $packageRoot 'cathub_virtual_serial_umdf.cat'
         $certificatePath = Join-Path $packageRoot 'cathub_umdf_test.cer'
+        $manifestPath = Join-Path $packageRoot 'package-manifest.json'
+        if (Test-Path -LiteralPath $manifestPath) {
+            Remove-Item -LiteralPath $manifestPath -Force
+        }
         $pfxPath = Join-Path ([System.IO.Path]::GetTempPath()) `
             "cathub-umdf-$([guid]::NewGuid().ToString('N')).pfx"
         $password = [guid]::NewGuid().ToString('N')
@@ -214,6 +268,7 @@ try {
             Invoke-Checked $signTool @(
                 'sign', '/v', '/fd', 'SHA256', '/f', $pfxPath, '/p', $password, $catalogPath
             )
+            Write-PackageManifest -PackageRoot $packageRoot -CertificatePath $certificatePath
         }
         finally {
             if (Test-Path -LiteralPath $pfxPath) {

@@ -93,6 +93,8 @@ negotiation, discovery, attach/detach, lifecycle events, framed data, receive cr
 modem events, purge, health checks, and deterministic protocol rejection. Its application data is
 kept separate from driver control frames.
 
-The private interface is not yet restricted to a service SID. The application COM path, private
-CatHub adapter, and driver package must still be verified together on the isolated
-driver-development target.
+The private daemon path uses UMDF request impersonation. Provisioning stores the invoking Windows
+user SID in the device instance; a daemon create request is accepted only when that SID is a member
+of the impersonated caller token. The public COM path does not use this private authorization check.
+The application COM path, private CatHub adapter, and driver package must still be verified
+together on the isolated driver-development target.
