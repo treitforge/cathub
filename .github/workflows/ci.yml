@@ -46,3 +46,28 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - run: dotnet build CatHub.slnx -c Release
+
+  umdf-driver:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: NuGet/setup-nuget@v4.0
+        with:
+          nuget-version: 6.14.3
+      - name: Restore pinned WDK
+        shell: pwsh
+        run: |
+          $packageRoot = Join-Path $env:LOCALAPPDATA 'CatHub\wdk\packages'
+          nuget install Microsoft.Windows.WDK.x64 `
+            -Version 10.0.28000.2526 `
+            -OutputDirectory $packageRoot `
+            -NonInteractive `
+            -DirectDownload `
+            -Source https://api.nuget.org/v3/index.json
+      - name: Build, test, and lint pure-Rust UMDF driver
+        shell: pwsh
+        run: .\scripts\Test-UmdfPoc.ps1

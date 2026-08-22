@@ -289,7 +289,7 @@ try {
     else {
         Invoke-Checked cargo @('fmt', '--all', '--', '--check')
         Invoke-Checked cargo @(
-            'check', '--target', 'x86_64-pc-windows-msvc', '--locked'
+            'build', '--target', 'x86_64-pc-windows-msvc', '--locked'
         )
         Invoke-Checked cargo @(
             'test', '--target', 'x86_64-pc-windows-msvc', '--locked'
