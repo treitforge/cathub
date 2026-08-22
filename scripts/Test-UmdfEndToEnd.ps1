@@ -43,6 +43,38 @@ function Invoke-Captured {
     }
 }
 
+function Write-JsonObject {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$InputObject,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    $writer = [System.IO.StreamWriter]::new($Path, $false, $encoding)
+    try {
+        $writer.Write('{')
+        $first = $true
+        foreach ($entry in $InputObject.GetEnumerator()) {
+            if (-not $first) {
+                $writer.Write(',')
+            }
+            $first = $false
+            $writer.Write((ConvertTo-Json -InputObject ([string]$entry.Key) -Compress))
+            $writer.Write(':')
+            $writer.Flush()
+            if ($null -eq $entry.Value) {
+                $writer.Write('null')
+            } else {
+                $writer.Write((ConvertTo-Json -InputObject $entry.Value -Depth 10 -Compress))
+            }
+        }
+        $writer.Write('}')
+    }
+    finally {
+        $writer.Dispose()
+    }
+}
+
 function Get-SignatureEvidence {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -157,16 +189,24 @@ function Get-PnpEvidence {
         $property = Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName $key `
             -ErrorAction SilentlyContinue
         if ($property) {
-            $properties[$key] = $property.Data
+            $properties[$key] = if ($null -eq $property.Data) {
+                $null
+            } elseif ($property.Data -is [Array]) {
+                @($property.Data | ForEach-Object { [string]$_ })
+            } elseif ($property.Data -is [ValueType]) {
+                $property.Data
+            } else {
+                [string]$property.Data
+            }
         }
     }
 
     return [ordered]@{
-        instance_id = $device.InstanceId
-        class = $device.Class
-        friendly_name = $device.FriendlyName
-        status = $device.Status
-        problem = $device.Problem
+        instance_id = [string]$device.InstanceId
+        class = [string]$device.Class
+        friendly_name = [string]$device.FriendlyName
+        status = [string]$device.Status
+        problem = [string]$device.Problem
         properties = $properties
     }
 }
@@ -178,11 +218,17 @@ function Get-EventEvidence {
     )
 
     try {
-        return @(
-            Get-WinEvent -FilterHashtable @{ LogName = $LogName; StartTime = $StartTime } `
-                -ErrorAction Stop |
-                Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message
-        )
+        return @(foreach ($event in Get-WinEvent `
+            -FilterHashtable @{ LogName = $LogName; StartTime = $StartTime } `
+            -MaxEvents 200 -ErrorAction Stop) {
+            [ordered]@{
+                time_created_utc = $event.TimeCreated.ToUniversalTime().ToString('o')
+                id = [int]$event.Id
+                level = [string]$event.LevelDisplayName
+                provider = [string]$event.ProviderName
+                message = [string]$event.Message
+            }
+        })
     }
     catch {
         return @([ordered]@{ collection_error = $_.Exception.Message })
@@ -623,7 +669,10 @@ try {
         response = $restartId
     }
 
-    Invoke-Checked pnputil @('/restart-device', $device.InstanceId)
+    $results.device_restart = Invoke-Captured pnputil @('/restart-device', $device.InstanceId)
+    if ($results.device_restart.exit_code -notin @(0, 3010)) {
+        throw "Restarting the CatHub device failed: $($results.device_restart.output)"
+    }
     $serial.ReadTimeout = 1000
     $deviceFailureTimer = [System.Diagnostics.Stopwatch]::StartNew()
     $deviceFailure = $null
@@ -808,7 +857,7 @@ finally {
     }
     $results.completed_at_utc = [DateTime]::UtcNow.ToString('o')
     $results.duration_ms = [long]([DateTime]::UtcNow - $testStart).TotalMilliseconds
-    $results | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $ResultsPath -Encoding utf8
+    Write-JsonObject -InputObject $results -Path $ResultsPath
 }
 
 if ($failure) {

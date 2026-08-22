@@ -1,7 +1,7 @@
 //! Auditable Windows/WDF FFI boundary.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     ffi::c_void,
     mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -46,6 +46,7 @@ const STATUS_DEVICE_NOT_CONNECTED: NTSTATUS = -1_073_741_667;
 const STATUS_CANCELLED: NTSTATUS = -1_073_741_536;
 const STATUS_BUFFER_OVERFLOW: NTSTATUS = -2_147_483_643;
 const TRUE: BOOLEAN = 1;
+const READ_TIMEOUT_TIMER_DUE_TIME_100NS: i64 = -100_000;
 
 const DAEMON_REFERENCE: [u16; 7] = [100, 97, 101, 109, 111, 110, 0];
 const PORT_NAME_VALUE: [u16; 9] = [80, 111, 114, 116, 78, 97, 109, 101, 0];
@@ -102,7 +103,7 @@ struct DeviceState {
     application_reads: AtomicPtr<WDFQUEUE__>,
     daemon_reads: AtomicPtr<WDFQUEUE__>,
     wait_requests: AtomicPtr<WDFQUEUE__>,
-    pending_application_reads: Mutex<VecDeque<PendingRead>>,
+    pending_application_reads: Mutex<PendingApplicationReads>,
     daemon_owner_sid: Box<[u8]>,
 }
 
@@ -110,6 +111,33 @@ struct DeviceState {
 struct PendingRead {
     request: usize,
     deadline: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct PendingApplicationReads {
+    queued: VecDeque<PendingRead>,
+    canceled_before_tracking: HashSet<usize>,
+}
+
+impl PendingApplicationReads {
+    fn track(&mut self, pending: PendingRead) {
+        if !self.canceled_before_tracking.remove(&pending.request) {
+            self.queued.push_back(pending);
+        }
+    }
+
+    fn cancel(&mut self, request: usize) {
+        let original_len = self.queued.len();
+        self.queued.retain(|pending| pending.request != request);
+        if self.queued.len() == original_len {
+            self.canceled_before_tracking.insert(request);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.queued.clear();
+        self.canceled_before_tracking.clear();
+    }
 }
 
 impl DeviceState {
@@ -128,7 +156,7 @@ impl DeviceState {
             application_reads: AtomicPtr::new(ptr::null_mut()),
             daemon_reads: AtomicPtr::new(ptr::null_mut()),
             wait_requests: AtomicPtr::new(ptr::null_mut()),
-            pending_application_reads: Mutex::new(VecDeque::new()),
+            pending_application_reads: Mutex::new(PendingApplicationReads::default()),
             daemon_owner_sid,
         }
     }
@@ -162,7 +190,7 @@ impl DeviceState {
         self.wait_requests.load(Ordering::Acquire)
     }
 
-    fn pending_application_reads(&self) -> MutexGuard<'_, VecDeque<PendingRead>> {
+    fn pending_application_reads(&self) -> MutexGuard<'_, PendingApplicationReads> {
         self.pending_application_reads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -418,12 +446,9 @@ unsafe fn record_startup_diagnostic(device: WDFDEVICE, stage: u32, status: NTSTA
 }
 
 unsafe fn configure_read_timeout_timer(device: WDFDEVICE) -> NTSTATUS {
-    const TIMER_PERIOD_MS: u32 = 10;
-    const FIRST_DUE_TIME_100NS: i64 = -100_000;
     let mut config = WDF_TIMER_CONFIG {
         Size: struct_size::<WDF_TIMER_CONFIG>(),
         EvtTimerFunc: Some(evt_read_timeout_timer),
-        Period: TIMER_PERIOD_MS,
         ..WDF_TIMER_CONFIG::default()
     };
     let mut attributes = WDF_OBJECT_ATTRIBUTES {
@@ -447,8 +472,9 @@ unsafe fn configure_read_timeout_timer(device: WDFDEVICE) -> NTSTATUS {
         return status;
     }
     // SAFETY: The timer was created successfully and accepts a relative 100ns due time.
-    let _was_queued =
-        unsafe { call_unsafe_wdf_function_binding!(WdfTimerStart, timer, FIRST_DUE_TIME_100NS) };
+    let _was_queued = unsafe {
+        call_unsafe_wdf_function_binding!(WdfTimerStart, timer, READ_TIMEOUT_TIMER_DUE_TIME_100NS,)
+    };
     STATUS_SUCCESS
 }
 
@@ -482,7 +508,10 @@ unsafe fn configure_queues(device: WDFDEVICE, state: &DeviceState) -> NTSTATUS {
     let mut default_queue: WDFQUEUE = ptr::null_mut();
     let mut config = WDF_IO_QUEUE_CONFIG {
         Size: struct_size::<WDF_IO_QUEUE_CONFIG>(),
-        DispatchType: _WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchSequential,
+        // Reads can remain pending while the daemon supplies their data. Parallel dispatch is
+        // required so that a pending application read does not block the daemon write that
+        // satisfies it; mutable transport state is protected by the DeviceState locks.
+        DispatchType: _WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
         PowerManaged: _WDF_TRI_STATE::WdfUseDefault,
         AllowZeroLengthRequests: TRUE,
         DefaultQueue: TRUE,
@@ -492,6 +521,10 @@ unsafe fn configure_queues(device: WDFDEVICE, state: &DeviceState) -> NTSTATUS {
         EvtIoDeviceControl: Some(evt_io_device_control),
         ..WDF_IO_QUEUE_CONFIG::default()
     };
+    // WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE sets this union member to ULONG_MAX for a
+    // parallel queue. The generated Rust Default implementation zeroes it, which means WDF
+    // presents no requests at all.
+    config.Settings.Parallel.NumberOfPresentedRequests = u32::MAX;
     // SAFETY: WDF copies the config; null attributes are allowed and output storage is valid.
     unsafe {
         call_unsafe_wdf_function_binding!(
@@ -746,6 +779,8 @@ unsafe fn register_legacy_serial_map(device: WDFDEVICE, port_name: &[u16]) -> NT
     let mut memory_attributes = WDF_OBJECT_ATTRIBUTES {
         Size: struct_size::<WDF_OBJECT_ATTRIBUTES>(),
         ParentObject: device.cast(),
+        ExecutionLevel: _WDF_EXECUTION_LEVEL::WdfExecutionLevelInheritFromParent,
+        SynchronizationScope: _WDF_SYNCHRONIZATION_SCOPE::WdfSynchronizationScopeInheritFromParent,
         ..WDF_OBJECT_ATTRIBUTES::default()
     };
     let mut memory: WDFMEMORY = ptr::null_mut();
@@ -1020,9 +1055,7 @@ unsafe extern "C" fn evt_io_canceled_on_queue(queue: WDFQUEUE, request: WDFREQUE
     ffi_void(|| {
         // SAFETY: WDF keeps the queue's parent device alive for this callback.
         if let Some(state) = unsafe { device_state_from_queue(queue) } {
-            state
-                .pending_application_reads()
-                .retain(|pending| pending.request != request.addr());
+            state.pending_application_reads().cancel(request.addr());
         }
         // SAFETY: WDF transfers ownership of the canceled request to the callback.
         unsafe { complete_request(request, STATUS_CANCELLED, 0) };
@@ -1042,6 +1075,16 @@ unsafe extern "C" fn evt_read_timeout_timer(timer: WDFTIMER) {
         };
         // SAFETY: The application read queue remains live while its parent device timer runs.
         unsafe { service_expired_application_reads(state) };
+        // UMDF passive-level timers must be one-shot. Rearm this timer after each scan rather
+        // than using WDF_TIMER_CONFIG.Period, which WDF rejects with STATUS_NOT_SUPPORTED.
+        // SAFETY: WDF keeps the timer live for the duration of its callback.
+        let _was_queued = unsafe {
+            call_unsafe_wdf_function_binding!(
+                WdfTimerStart,
+                timer,
+                READ_TIMEOUT_TIMER_DUE_TIME_100NS,
+            )
+        };
     });
 }
 
@@ -1061,7 +1104,10 @@ unsafe fn handle_read(
         return RequestDisposition::success(0);
     }
     let available = match role {
-        ChannelRole::Application => state.channel().plane.available_to_read(role),
+        // An application is allowed to establish a pending or timed read before the daemon
+        // attaches. Writes still fail closed until the daemon is present, and daemon cleanup
+        // drains already-pending reads.
+        ChannelRole::Application => Ok(state.channel().plane.incoming_len(role)),
         ChannelRole::Daemon => state.channel().plane.available_for_daemon(),
     };
     match available {
@@ -1078,18 +1124,16 @@ unsafe fn handle_read(
             if queue.is_null() {
                 return RequestDisposition::error(STATUS_UNSUCCESSFUL);
             }
-            let mut pending =
-                (role == ChannelRole::Application).then(|| state.pending_application_reads());
             // SAFETY: The request is framework-owned and target is a valid manual queue.
             let status = unsafe {
                 call_unsafe_wdf_function_binding!(WdfRequestForwardToIoQueue, request, queue)
             };
             if nt_success(status) {
-                if let Some(pending) = pending.as_mut() {
+                if role == ChannelRole::Application {
                     let deadline = timeout_ms.and_then(|milliseconds| {
                         Instant::now().checked_add(Duration::from_millis(milliseconds))
                     });
-                    pending.push_back(PendingRead {
+                    state.pending_application_reads().track(PendingRead {
                         request: request.addr(),
                         deadline,
                     });
@@ -1664,7 +1708,9 @@ unsafe fn service_pending_reads(state: &DeviceState, role: ChannelRole) {
             break;
         }
         if let Some(pending) = pending_application.as_mut() {
-            pending.retain(|entry| entry.request != request.addr());
+            pending
+                .queued
+                .retain(|entry| entry.request != request.addr());
         }
         // SAFETY: Retrieval transfers the queued request to this driver.
         let disposition = unsafe { read_available(state, request, role, usize::MAX) };
@@ -1681,13 +1727,14 @@ unsafe fn service_expired_application_reads(state: &DeviceState) {
     let mut pending = state.pending_application_reads();
     loop {
         let expired = pending
+            .queued
             .front()
             .and_then(|entry| entry.deadline)
             .is_some_and(|deadline| deadline <= Instant::now());
         if !expired {
             break;
         }
-        let expected = pending.front().map(|entry| entry.request);
+        let expected = pending.queued.front().map(|entry| entry.request);
         let mut request: WDFREQUEST = ptr::null_mut();
         // SAFETY: Queue is a valid manual queue and request is valid output storage.
         let status = unsafe {
@@ -1701,9 +1748,11 @@ unsafe fn service_expired_application_reads(state: &DeviceState) {
             pending.clear();
             break;
         }
-        pending.pop_front();
+        pending.queued.pop_front();
         if expected != Some(request.addr()) {
-            pending.retain(|entry| entry.request != request.addr());
+            pending
+                .queued
+                .retain(|entry| entry.request != request.addr());
         }
         drop(pending);
         // SAFETY: Retrieval transfers ownership of this expired request to the driver.
@@ -1752,6 +1801,9 @@ unsafe fn role_from_file(file: WDFFILEOBJECT) -> Option<ChannelRole> {
     }
     // SAFETY: WDF returns a valid counted string for the file object's lifetime.
     let name = unsafe { &*name };
+    if name.Length == 0 {
+        return Some(ChannelRole::Application);
+    }
     if name.Buffer.is_null() || name.Length % 2 != 0 {
         return None;
     }
@@ -2052,5 +2104,33 @@ mod tests {
         );
         assert!(first.queue_for(ChannelRole::Application).is_null());
         assert!(second.queue_for(ChannelRole::Daemon).is_null());
+    }
+
+    #[test]
+    fn pending_read_cancellation_removes_an_already_tracked_request() {
+        let mut reads = PendingApplicationReads::default();
+        reads.track(PendingRead {
+            request: 17,
+            deadline: None,
+        });
+
+        reads.cancel(17);
+
+        assert!(reads.queued.is_empty());
+        assert!(reads.canceled_before_tracking.is_empty());
+    }
+
+    #[test]
+    fn pending_read_cancellation_race_is_consumed_when_tracking_catches_up() {
+        let mut reads = PendingApplicationReads::default();
+        reads.cancel(23);
+
+        reads.track(PendingRead {
+            request: 23,
+            deadline: None,
+        });
+
+        assert!(reads.queued.is_empty());
+        assert!(reads.canceled_before_tracking.is_empty());
     }
 }

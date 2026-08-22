@@ -7,11 +7,11 @@ use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Devices::Communication::{
-    BuildCommDCBW, ClearCommBreak, ClearCommError, EscapeCommFunction, GetCommMask,
-    GetCommModemStatus, GetCommProperties, GetCommState, GetCommTimeouts, PurgeComm, SetCommBreak,
-    SetCommMask, SetCommState, SetCommTimeouts, WaitCommEvent, CLRDTR, CLRRTS, COMMPROP,
-    COMMTIMEOUTS, COMSTAT, DCB, EV_RXCHAR, NOPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR,
-    PURGE_TXABORT, PURGE_TXCLEAR, SETDTR, SETRTS, TWOSTOPBITS,
+    ClearCommBreak, ClearCommError, EscapeCommFunction, GetCommMask, GetCommModemStatus,
+    GetCommProperties, GetCommState, GetCommTimeouts, PurgeComm, SetCommBreak, SetCommMask,
+    SetCommState, SetCommTimeouts, WaitCommEvent, CLRDTR, CLRRTS, COMMPROP, COMMTIMEOUTS, COMSTAT,
+    DCB, EV_RXCHAR, NOPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR, PURGE_TXABORT,
+    PURGE_TXCLEAR, SETDTR, SETRTS, TWOSTOPBITS,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GENERIC_READ,
@@ -43,6 +43,7 @@ const DCB_FLOW_CONTROL_MASK: u32 = (1 << 2)
     | (1 << 11)
     | (3 << 12)
     | (1 << 14);
+const DESIRED_DCB_FLAGS: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 8) | (1 << 9) | (2 << 12);
 
 #[derive(Clone, Copy)]
 enum PeerTarget<'a> {
@@ -194,6 +195,9 @@ fn overlapped_io(
 
 fn cancel_pending_read(application_port: &str) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, true)?;
+    // COM timeouts are device state and can persist across handles. Explicitly disable them so
+    // this case measures cancellation rather than racing a timeout configured by an earlier run.
+    set_timeout(application.handle(), 0)?;
     let event = Event::new()?;
     let mut overlapped: OVERLAPPED = unsafe { zeroed() };
     overlapped.hEvent = event.handle();
@@ -348,16 +352,17 @@ fn serial_configuration(
     }
 
     let winkeyer = matches!(profile.name, "n1mm-winkeyer" | "wktools");
-    let command = if winkeyer {
-        "baud=1200 parity=N data=8 stop=2 xon=on octs=on odsr=off dtr=on rts=hs"
-    } else {
-        "baud=9600 parity=N data=8 stop=1 xon=on octs=on odsr=off dtr=on rts=hs"
-    };
     let mut proposed = original;
-    let wide = wide(command);
-    if unsafe { BuildCommDCBW(wide.as_ptr(), &mut proposed) } == 0 {
-        return Err(last_error("BuildCommDCBW"));
-    }
+    proposed.BaudRate = if winkeyer { 1_200 } else { 9_600 };
+    proposed.ByteSize = 8;
+    proposed.Parity = NOPARITY;
+    proposed.StopBits = if winkeyer { TWOSTOPBITS } else { ONESTOPBIT };
+    // Binary mode, CTS output flow, enabled DTR, software XON/XOFF in both directions,
+    // and RTS handshake. Set the DCB directly so this case tests the serial driver rather
+    // than BuildCommDCB's command-string parser.
+    proposed._bitfield = (proposed._bitfield & !(DCB_FLOW_CONTROL_MASK | 1)) | DESIRED_DCB_FLAGS;
+    proposed.XonChar = 0x11;
+    proposed.XoffChar = 0x13;
 
     let result = (|| {
         if unsafe { SetCommState(application.handle(), &proposed) } == 0 {
@@ -391,7 +396,9 @@ fn serial_configuration(
             )));
         }
         Ok(format!(
-            "serial format and flow control accepted: {command}"
+            "serial format and flow control accepted: baud={} parity=N data=8 stop={} xon=on octs=on odsr=off dtr=on rts=hs",
+            proposed.BaudRate,
+            if winkeyer { 2 } else { 1 }
         ))
     })();
 

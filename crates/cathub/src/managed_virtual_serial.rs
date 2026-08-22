@@ -105,9 +105,10 @@ fn spawn_bridge(mut worker: platform::Worker) -> DuplexStream {
 #[allow(unsafe_code)]
 mod platform {
     use std::fs::{File, OpenOptions};
-    use std::io::{self, Read, Write};
-    use std::mem::{offset_of, size_of};
+    use std::io;
+    use std::mem::{offset_of, size_of, zeroed};
     use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
     use std::ptr::{null, null_mut};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -123,9 +124,14 @@ mod platform {
         SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
     };
     use windows_sys::Win32::Foundation::{
-        GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_IO_PENDING,
+        ERROR_NO_MORE_ITEMS, HANDLE, INVALID_HANDLE_VALUE,
     };
-    use windows_sys::Win32::Storage::FileSystem::{SECURITY_IMPERSONATION, SECURITY_SQOS_PRESENT};
+    use windows_sys::Win32::Storage::FileSystem::{
+        ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, SECURITY_IMPERSONATION, SECURITY_SQOS_PRESENT,
+    };
+    use windows_sys::Win32::System::Threading::CreateEventW;
+    use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 
     const PRIVATE_INTERFACE: GUID = GUID {
         data1: 0x0084_BDDE,
@@ -177,7 +183,7 @@ mod platform {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION)
+            .custom_flags(SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION | FILE_FLAG_OVERLAPPED)
             .open(path)?;
         let mut protocol = DaemonProtocol::new();
 
@@ -276,14 +282,14 @@ mod platform {
 
     #[allow(clippy::needless_pass_by_value)]
     fn reader_loop(
-        mut file: File,
+        file: File,
         protocol: Arc<Mutex<DaemonProtocol>>,
         stopping: Arc<AtomicBool>,
         events: mpsc::Sender<Event>,
     ) {
         let mut buffer = vec![0_u8; 16 * 1024];
         loop {
-            let count = match file.read(&mut buffer) {
+            let count = match read_overlapped(&file, &mut buffer) {
                 Ok(0) => {
                     let _ = events.blocking_send(Event::Closed);
                     return;
@@ -392,7 +398,7 @@ mod platform {
         let mut all_events = Vec::new();
         let mut buffer = vec![0_u8; 16 * 1024];
         loop {
-            let count = file.read(&mut buffer)?;
+            let count = read_overlapped(file, &mut buffer)?;
             if count == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -411,11 +417,113 @@ mod platform {
     }
 
     fn write_frame(file: &mut File, frame: &[u8]) -> io::Result<()> {
-        file.write_all(frame)
+        let mut written = 0;
+        while written < frame.len() {
+            let count = write_overlapped(file, frame.get(written..).unwrap_or_default())?;
+            if count == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "UMDF private channel accepted zero bytes",
+                ));
+            }
+            written += count;
+        }
+        Ok(())
     }
 
     fn write_optional_frame(file: &mut File, frame: Option<Vec<u8>>) -> io::Result<()> {
         frame.map_or(Ok(()), |frame| write_frame(file, &frame))
+    }
+
+    fn read_overlapped(file: &File, buffer: &mut [u8]) -> io::Result<usize> {
+        let length = u32::try_from(buffer.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "read buffer is too large"))?;
+        let event = EventHandle::new()?;
+        // SAFETY: OVERLAPPED is a plain Windows I/O descriptor; zero is its required baseline.
+        let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+        overlapped.hEvent = event.0;
+        let mut transferred = 0_u32;
+        // SAFETY: The file was opened for overlapped I/O and all buffers live through completion.
+        let started = unsafe {
+            ReadFile(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr().cast(),
+                length,
+                &raw mut transferred,
+                &raw mut overlapped,
+            )
+        };
+        finish_overlapped(file, &overlapped, started, &mut transferred)?;
+        usize::try_from(transferred)
+            .map_err(|_| io::Error::other("overlapped read length does not fit usize"))
+    }
+
+    fn write_overlapped(file: &File, buffer: &[u8]) -> io::Result<usize> {
+        let length = u32::try_from(buffer.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "write buffer is too large")
+        })?;
+        let event = EventHandle::new()?;
+        // SAFETY: OVERLAPPED is a plain Windows I/O descriptor; zero is its required baseline.
+        let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+        overlapped.hEvent = event.0;
+        let mut transferred = 0_u32;
+        // SAFETY: The file was opened for overlapped I/O and all buffers live through completion.
+        let started = unsafe {
+            WriteFile(
+                file.as_raw_handle(),
+                buffer.as_ptr().cast(),
+                length,
+                &raw mut transferred,
+                &raw mut overlapped,
+            )
+        };
+        finish_overlapped(file, &overlapped, started, &mut transferred)?;
+        usize::try_from(transferred)
+            .map_err(|_| io::Error::other("overlapped write length does not fit usize"))
+    }
+
+    fn finish_overlapped(
+        file: &File,
+        overlapped: &OVERLAPPED,
+        started: i32,
+        transferred: &mut u32,
+    ) -> io::Result<()> {
+        if started == 0 {
+            // SAFETY: GetLastError immediately follows the failed Windows I/O call.
+            let error = unsafe { GetLastError() };
+            if error != ERROR_IO_PENDING {
+                return Err(io::Error::from_raw_os_error(
+                    i32::try_from(error).unwrap_or(i32::MAX),
+                ));
+            }
+            // SAFETY: The file and OVERLAPPED descriptor remain live until completion.
+            if unsafe { GetOverlappedResult(file.as_raw_handle(), overlapped, transferred, 1) } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    struct EventHandle(HANDLE);
+
+    impl EventHandle {
+        fn new() -> io::Result<Self> {
+            // SAFETY: Null security/name pointers request a private manual-reset event.
+            let handle = unsafe { CreateEventW(null(), 1, 0, null()) };
+            if handle.is_null() {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(Self(handle))
+            }
+        }
+    }
+
+    impl Drop for EventHandle {
+        fn drop(&mut self) {
+            // SAFETY: This wrapper exclusively owns the event handle.
+            let _ = unsafe { CloseHandle(self.0) };
+        }
     }
 
     fn protocol_error(error: impl std::fmt::Display) -> io::Error {

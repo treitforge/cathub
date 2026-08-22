@@ -52,6 +52,7 @@ UmdfHostProcessSharing=ProcessSharingDisabled
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
+UmdfImpersonationLevel=Impersonation
 
 [CatHubHdsdr_Install.NT]
 CopyFiles=DriverCopy
@@ -74,6 +75,7 @@ UmdfHostProcessSharing=ProcessSharingDisabled
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
+UmdfImpersonationLevel=Impersonation
 
 [CatHubN1mmCat_Install.NT]
 CopyFiles=DriverCopy
@@ -96,6 +98,7 @@ UmdfHostProcessSharing=ProcessSharingDisabled
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
+UmdfImpersonationLevel=Impersonation
 
 [CatHubArcp_Install.NT]
 CopyFiles=DriverCopy
@@ -118,6 +121,7 @@ UmdfHostProcessSharing=ProcessSharingDisabled
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
+UmdfImpersonationLevel=Impersonation
 
 [CatHubN1mmWinkeyer_Install.NT]
 CopyFiles=DriverCopy
@@ -140,6 +144,7 @@ UmdfHostProcessSharing=ProcessSharingDisabled
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
+UmdfImpersonationLevel=Impersonation
 
 [CatHubWktools_Install.NT]
 CopyFiles=DriverCopy
@@ -162,11 +167,11 @@ UmdfHostProcessSharing=ProcessSharingDisabled
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 UmdfFsContextUsePolicy=CannotUseFsContexts
+UmdfImpersonationLevel=Impersonation
 
 [CatHubUMDFDevice_WdfInstall]
 UmdfLibraryVersion=$UMDFVERSION$
 ServiceBinary=%13%\cathub_virtual_serial_umdf.dll
-UmdfImpersonationLevel=Impersonation
 
 [SetDeviceType_AddReg]
 HKR,,DeviceType,0x10001,0x0000001b

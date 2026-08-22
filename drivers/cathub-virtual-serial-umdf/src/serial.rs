@@ -310,9 +310,7 @@ impl SerialState {
     }
 
     pub const fn set_timeouts(&mut self, value: SerialTimeouts) -> Result<(), SerialStateError> {
-        if value.read_interval_timeout == u32::MAX
-            && value.read_total_timeout_multiplier == u32::MAX
-            && value.read_total_timeout_constant == u32::MAX
+        if value.read_interval_timeout == u32::MAX && value.read_total_timeout_constant == u32::MAX
         {
             return Err(SerialStateError::Timeouts);
         }
@@ -332,6 +330,15 @@ impl SerialState {
             && timeouts.read_total_timeout_constant == 0
         {
             return Some(0);
+        }
+        // Windows and .NET SerialPort use this sentinel combination for a read that returns as
+        // soon as one byte arrives, or after the constant when the input buffer remains empty.
+        if timeouts.read_interval_timeout == u32::MAX
+            && timeouts.read_total_timeout_multiplier == u32::MAX
+            && timeouts.read_total_timeout_constant > 0
+            && timeouts.read_total_timeout_constant < u32::MAX
+        {
+            return Some(u64::from(timeouts.read_total_timeout_constant));
         }
         let multiplier = u64::from(timeouts.read_total_timeout_multiplier);
         let requested = u64::try_from(requested_bytes).unwrap_or(u64::MAX);
@@ -595,12 +602,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_windows_unsupported_all_maximum_read_timeouts() {
+    fn rejects_windows_unsupported_maximum_interval_and_constant() {
         let mut state = SerialState::default();
         assert_eq!(
             state.set_timeouts(SerialTimeouts {
                 read_interval_timeout: u32::MAX,
                 read_total_timeout_multiplier: u32::MAX,
+                read_total_timeout_constant: u32::MAX,
+                ..SerialTimeouts::default()
+            }),
+            Err(SerialStateError::Timeouts)
+        );
+        assert_eq!(
+            state.set_timeouts(SerialTimeouts {
+                read_interval_timeout: u32::MAX,
+                read_total_timeout_multiplier: 0,
                 read_total_timeout_constant: u32::MAX,
                 ..SerialTimeouts::default()
             }),
@@ -628,6 +644,16 @@ mod tests {
             })
             .expect("immediate timeouts");
         assert_eq!(state.empty_read_timeout_ms(10), Some(0));
+
+        state
+            .set_timeouts(SerialTimeouts {
+                read_interval_timeout: u32::MAX,
+                read_total_timeout_multiplier: u32::MAX,
+                read_total_timeout_constant: 100,
+                ..SerialTimeouts::default()
+            })
+            .expect("first-byte timeout");
+        assert_eq!(state.empty_read_timeout_ms(10), Some(100));
     }
 
     #[test]
