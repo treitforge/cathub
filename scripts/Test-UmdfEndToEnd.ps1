@@ -175,6 +175,21 @@ try {
     }
     $results.cases += [ordered]@{ name = 'initial_id_query'; passed = $true; response = $id }
 
+    $stressTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    foreach ($iteration in 1..100) {
+        $stressId = Invoke-CatQuery -Port $serial -Command 'ID;'
+        if ($stressId -ne 'ID021;') {
+            throw "Unexpected stress response '$stressId' at iteration $iteration."
+        }
+    }
+    $stressTimer.Stop()
+    $results.cases += [ordered]@{
+        name = 'repeated_bidirectional_io'
+        passed = $true
+        iterations = 100
+        elapsed_ms = $stressTimer.ElapsedMilliseconds
+    }
+
     $serial.Write('FA00014074000;')
     $frequency = Invoke-CatQuery -Port $serial -Command 'FA;'
     if ($frequency -ne 'FA00014074000;') {
@@ -203,6 +218,60 @@ try {
         name = 'close_reopen_reconnect'
         passed = $true
         response = $reopenedId
+    }
+
+    Stop-Process -Id $process.Id -Force
+    $process.WaitForExit()
+    $process = $null
+    $serial.ReadTimeout = 1000
+    $failureTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $boundedFailure = $null
+    try {
+        $serial.Write('ID;')
+        $null = $serial.ReadTo(';')
+    }
+    catch {
+        $boundedFailure = $_.Exception.Message
+    }
+    $failureTimer.Stop()
+    if (-not $boundedFailure) {
+        throw 'Application I/O unexpectedly succeeded after the CatHub daemon was terminated.'
+    }
+    if ($failureTimer.ElapsedMilliseconds -gt 2000) {
+        throw "Daemon-loss I/O failure took $($failureTimer.ElapsedMilliseconds) ms."
+    }
+    $results.cases += [ordered]@{
+        name = 'daemon_crash_fails_io_bounded'
+        passed = $true
+        elapsed_ms = $failureTimer.ElapsedMilliseconds
+        error = $boundedFailure
+    }
+    $serial.Close()
+    $serial.Dispose()
+    $serial = $null
+
+    $process = Start-Process -FilePath $CatHubExe `
+        -ArgumentList @('--config', $configPath) `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+    Start-Sleep -Seconds 2
+    if ($process.HasExited) {
+        throw "CatHub exited after restart with code $($process.ExitCode)."
+    }
+
+    $serial = [System.IO.Ports.SerialPort]::new($portName, 9600)
+    $serial.ReadTimeout = 5000
+    $serial.WriteTimeout = 5000
+    $serial.Open()
+    $restartId = Invoke-CatQuery -Port $serial -Command 'ID;'
+    if ($restartId -ne 'ID021;') {
+        throw "Unexpected ID response after daemon restart '$restartId'."
+    }
+    $results.cases += [ordered]@{
+        name = 'daemon_restart_reconnect'
+        passed = $true
+        response = $restartId
     }
     $results.passed = $true
 }
