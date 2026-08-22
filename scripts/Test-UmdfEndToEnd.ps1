@@ -5,7 +5,9 @@ param(
 
     [string]$DriverPackage = (Join-Path $PSScriptRoot 'driver'),
     [string]$CatHubExe = (Join-Path $PSScriptRoot 'cathub.exe'),
-    [string]$ResultsPath = (Join-Path $PSScriptRoot 'cathub-umdf-e2e.json')
+    [string]$ResultsPath = (Join-Path $PSScriptRoot 'cathub-umdf-e2e.json'),
+
+    [switch]$KeepInstalled
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +21,166 @@ function Invoke-Checked {
     & $Command @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "'$Command $($Arguments -join ' ')' failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Invoke-Captured {
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $output = (& $Command @Arguments 2>&1 | Out-String).Trim()
+    return [ordered]@{
+        command = "$Command $($Arguments -join ' ')"
+        exit_code = $LASTEXITCODE
+        output = $output
+    }
+}
+
+function Get-SignatureEvidence {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    return [ordered]@{
+        path = $Path
+        status = $signature.Status.ToString()
+        status_message = $signature.StatusMessage
+        signer_subject = if ($signature.SignerCertificate) {
+            $signature.SignerCertificate.Subject
+        } else { $null }
+        signer_thumbprint = if ($signature.SignerCertificate) {
+            $signature.SignerCertificate.Thumbprint
+        } else { $null }
+        timestamp_subject = if ($signature.TimeStamperCertificate) {
+            $signature.TimeStamperCertificate.Subject
+        } else { $null }
+    }
+}
+
+function Get-PackageIntegrityEvidence {
+    param(
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)]$Manifest
+    )
+
+    $files = foreach ($expected in $Manifest.files) {
+        $path = Join-Path $PackageRoot $expected.name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            [ordered]@{
+                name = $expected.name
+                exists = $false
+                passed = $false
+            }
+            continue
+        }
+
+        $item = Get-Item -LiteralPath $path
+        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        [ordered]@{
+            name = $expected.name
+            exists = $true
+            expected_length = [long]$expected.length
+            actual_length = [long]$item.Length
+            expected_sha256 = $expected.sha256
+            actual_sha256 = $actualHash
+            passed = (
+                [long]$item.Length -eq [long]$expected.length -and
+                $actualHash -eq $expected.sha256
+            )
+        }
+    }
+
+    return [ordered]@{
+        passed = @($files | Where-Object { -not $_.passed }).Count -eq 0
+        files = @($files)
+    }
+}
+
+function Get-SecurityEvidence {
+    $secureBoot = $null
+    $secureBootError = $null
+    try {
+        $secureBoot = [bool](Confirm-SecureBootUEFI -ErrorAction Stop)
+    }
+    catch {
+        $secureBootError = $_.Exception.Message
+    }
+
+    $deviceGuard = $null
+    $deviceGuardError = $null
+    try {
+        $guard = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' `
+            -ClassName Win32_DeviceGuard -ErrorAction Stop
+        $deviceGuard = [ordered]@{
+            virtualization_based_security_status = $guard.VirtualizationBasedSecurityStatus
+            security_services_configured = @($guard.SecurityServicesConfigured)
+            security_services_running = @($guard.SecurityServicesRunning)
+            available_security_properties = @($guard.AvailableSecurityProperties)
+        }
+    }
+    catch {
+        $deviceGuardError = $_.Exception.Message
+    }
+
+    $bootPolicy = Invoke-Captured bcdedit.exe @('/enum', '{current}')
+    return [ordered]@{
+        secure_boot_enabled = $secureBoot
+        secure_boot_error = $secureBootError
+        device_guard = $deviceGuard
+        device_guard_error = $deviceGuardError
+        testsigning_enabled = [bool]($bootPolicy.output -match '(?im)^testsigning\s+Yes\s*$')
+        no_integrity_checks_enabled = [bool](
+            $bootPolicy.output -match '(?im)^nointegritychecks\s+Yes\s*$'
+        )
+        boot_policy = $bootPolicy
+    }
+}
+
+function Get-PnpEvidence {
+    param([Parameter(Mandatory)][string]$InstanceId)
+
+    $device = Get-PnpDevice -InstanceId $InstanceId -ErrorAction Stop
+    $properties = [ordered]@{}
+    foreach ($key in @(
+        'DEVPKEY_Device_DriverInfPath',
+        'DEVPKEY_Device_DriverVersion',
+        'DEVPKEY_Device_DriverProvider',
+        'DEVPKEY_Device_ProblemCode',
+        'DEVPKEY_Device_Service'
+    )) {
+        $property = Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName $key `
+            -ErrorAction SilentlyContinue
+        if ($property) {
+            $properties[$key] = $property.Data
+        }
+    }
+
+    return [ordered]@{
+        instance_id = $device.InstanceId
+        class = $device.Class
+        friendly_name = $device.FriendlyName
+        status = $device.Status
+        problem = $device.Problem
+        properties = $properties
+    }
+}
+
+function Get-EventEvidence {
+    param(
+        [Parameter(Mandatory)][string]$LogName,
+        [Parameter(Mandatory)][DateTime]$StartTime
+    )
+
+    try {
+        return @(
+            Get-WinEvent -FilterHashtable @{ LogName = $LogName; StartTime = $StartTime } `
+                -ErrorAction Stop |
+                Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message
+        )
+    }
+    catch {
+        return @([ordered]@{ collection_error = $_.Exception.Message })
     }
 }
 
@@ -82,7 +244,17 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $infPath = Join-Path $DriverPackage 'cathub_virtual_serial_umdf.inf'
 $certificatePath = Join-Path $DriverPackage 'cathub_umdf_test.cer'
-foreach ($path in @($infPath, $certificatePath, $CatHubExe)) {
+$catalogPath = Join-Path $DriverPackage 'cathub_virtual_serial_umdf.cat'
+$driverDllPath = Join-Path $DriverPackage 'cathub_virtual_serial_umdf.dll'
+$manifestPath = Join-Path $DriverPackage 'package-manifest.json'
+foreach ($path in @(
+    $infPath,
+    $certificatePath,
+    $catalogPath,
+    $driverDllPath,
+    $manifestPath,
+    $CatHubExe
+)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required test input is missing: $path"
     }
@@ -110,29 +282,99 @@ perms = ["read", "frequency_write", "write", "ptt", "config_write"]
 $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
     $certificatePath
 )
-Invoke-Checked certutil @('-f', '-addstore', 'Root', $certificatePath)
-Invoke-Checked certutil @('-f', '-addstore', 'TrustedPublisher', $certificatePath)
-Invoke-Checked $CatHubExe @(
-    '--config', $configPath,
-    'virtual-serial', 'apply',
-    '--inf', $infPath,
-    '--format', 'json'
-)
-
-$device = Find-CatHubDevice
-$portName = $device.Port
+$testStart = [DateTime]::UtcNow
+$operatingSystem = Get-CimInstance Win32_OperatingSystem
+$packageManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$device = $null
+$portName = $null
+$publishedInf = $null
 $process = $null
 $serial = $null
+$failure = $null
 $results = [ordered]@{
-    timestamp_utc = [DateTime]::UtcNow.ToString('o')
+    timestamp_utc = $testStart.ToString('o')
     machine = $env:COMPUTERNAME
-    port = $portName
-    device_instance_id = $device.InstanceId
+    os = [ordered]@{
+        caption = $operatingSystem.Caption
+        version = $operatingSystem.Version
+        build_number = $operatingSystem.BuildNumber
+    }
+    security = Get-SecurityEvidence
+    package_manifest = $packageManifest
+    package_integrity = Get-PackageIntegrityEvidence `
+        -PackageRoot $DriverPackage -Manifest $packageManifest
+    cathub_exe_sha256 = (Get-FileHash -LiteralPath $CatHubExe -Algorithm SHA256).Hash
+    harness_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+    signatures_before_trust = [ordered]@{
+        catalog = Get-SignatureEvidence -Path $catalogPath
+        driver_dll = Get-SignatureEvidence -Path $driverDllPath
+        cathub_exe = Get-SignatureEvidence -Path $CatHubExe
+    }
+    port = $null
+    device_instance_id = $null
     driver_certificate = $certificate.Thumbprint
+    keep_installed = [bool]$KeepInstalled
     cases = @()
 }
 
 try {
+    if (-not $results.package_integrity.passed) {
+        throw 'One or more staged driver files do not match package-manifest.json.'
+    }
+    if ($results.security.secure_boot_enabled -ne $true) {
+        throw 'Secure Boot is not enabled in the isolated Windows test target.'
+    }
+    if ($results.security.testsigning_enabled) {
+        throw 'Windows test-signing mode is enabled; the acceptance target must use normal policy.'
+    }
+    if ($results.security.no_integrity_checks_enabled) {
+        throw 'Windows integrity checks are disabled; the acceptance target must use normal policy.'
+    }
+    if (
+        -not $results.security.device_guard -or
+        2 -notin @($results.security.device_guard.security_services_running)
+    ) {
+        throw 'Memory Integrity (HVCI) is not reported as running on the isolated target.'
+    }
+
+    $results.certificate_root_install = Invoke-Captured certutil @(
+        '-f', '-addstore', 'Root', $certificatePath
+    )
+    if ($results.certificate_root_install.exit_code -ne 0) {
+        throw 'Installing the test certificate in LocalMachine\Root failed.'
+    }
+    $results.certificate_publisher_install = Invoke-Captured certutil @(
+        '-f', '-addstore', 'TrustedPublisher', $certificatePath
+    )
+    if ($results.certificate_publisher_install.exit_code -ne 0) {
+        throw 'Installing the test certificate in LocalMachine\TrustedPublisher failed.'
+    }
+    $results.signatures_after_trust = [ordered]@{
+        catalog = Get-SignatureEvidence -Path $catalogPath
+        driver_dll = Get-SignatureEvidence -Path $driverDllPath
+        cathub_exe = Get-SignatureEvidence -Path $CatHubExe
+    }
+    if ($results.signatures_after_trust.catalog.status -ne 'Valid') {
+        throw "The installed catalog signature is not valid: $($results.signatures_after_trust.catalog.status_message)"
+    }
+
+    $results.apply = Invoke-Captured $CatHubExe @(
+        '--config', $configPath,
+        'virtual-serial', 'apply',
+        '--inf', $infPath,
+        '--format', 'json'
+    )
+    if ($results.apply.exit_code -ne 0) {
+        throw "CatHub virtual-serial apply failed: $($results.apply.output)"
+    }
+
+    $device = Find-CatHubDevice
+    $portName = $device.Port
+    $results.port = $portName
+    $results.device_instance_id = $device.InstanceId
+    $results.pnp_after_install = Get-PnpEvidence -InstanceId $device.InstanceId
+    $publishedInf = $results.pnp_after_install.properties['DEVPKEY_Device_DriverInfPath']
+
     $process = Start-Process -FilePath $CatHubExe `
         -ArgumentList @('--config', $configPath) `
         -RedirectStandardOutput $stdoutPath `
@@ -308,6 +550,7 @@ try {
     if ($restartedDevice.InstanceId -ne $device.InstanceId) {
         throw "Device restart changed instance ID to '$($restartedDevice.InstanceId)'."
     }
+    $results.pnp_after_restart = Get-PnpEvidence -InstanceId $restartedDevice.InstanceId
 
     $reconnectDeadline = [DateTime]::UtcNow.AddSeconds(20)
     $deviceRestartId = $null
@@ -352,7 +595,7 @@ try {
 catch {
     $results.passed = $false
     $results.error = $_.Exception.Message
-    throw
+    $failure = $_
 }
 finally {
     if ($serial) {
@@ -365,14 +608,102 @@ finally {
         Stop-Process -Id $process.Id -Force
         $process.WaitForExit()
     }
+
+    if ($results.passed -and -not $KeepInstalled) {
+        try {
+            $cleanup = [ordered]@{}
+            $cleanup.remove_endpoint = Invoke-Captured $CatHubExe @(
+                '--config', $configPath,
+                'virtual-serial', 'remove',
+                '--endpoint', 'cathub-default',
+                '--format', 'json'
+            )
+            if ($cleanup.remove_endpoint.exit_code -ne 0) {
+                throw "Removing the CatHub endpoint failed: $($cleanup.remove_endpoint.output)"
+            }
+
+            Start-Sleep -Seconds 1
+            $remainingDevice = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+                Where-Object InstanceId -EQ $device.InstanceId
+            if ($remainingDevice) {
+                throw "CatHub device '$($device.InstanceId)' is still present after removal."
+            }
+
+            if ($publishedInf -notmatch '^oem\d+\.inf$') {
+                throw "Could not determine the staged OEM INF name (reported '$publishedInf')."
+            }
+            $cleanup.delete_driver_package = Invoke-Captured pnputil.exe @(
+                '/delete-driver', $publishedInf, '/uninstall', '/force'
+            )
+            if ($cleanup.delete_driver_package.exit_code -ne 0) {
+                throw "Deleting driver package '$publishedInf' failed: $($cleanup.delete_driver_package.output)"
+            }
+
+            $cleanup.delete_trusted_publisher_certificate = Invoke-Captured certutil.exe @(
+                '-delstore', 'TrustedPublisher', $certificate.Thumbprint
+            )
+            if ($cleanup.delete_trusted_publisher_certificate.exit_code -ne 0) {
+                throw 'Removing the test certificate from TrustedPublisher failed.'
+            }
+            $cleanup.delete_root_certificate = Invoke-Captured certutil.exe @(
+                '-delstore', 'Root', $certificate.Thumbprint
+            )
+            if ($cleanup.delete_root_certificate.exit_code -ne 0) {
+                throw 'Removing the test certificate from Root failed.'
+            }
+
+            $cleanup.status_after_remove = Invoke-Captured $CatHubExe @(
+                'virtual-serial', 'status', '--format', 'json'
+            )
+            if ($cleanup.status_after_remove.exit_code -ne 0) {
+                throw "Post-removal status failed: $($cleanup.status_after_remove.output)"
+            }
+            $cleanup.passed = $true
+            $results.cleanup = $cleanup
+            $results.cases += [ordered]@{
+                name = 'remove_device_driver_and_test_trust'
+                passed = $true
+                published_inf = $publishedInf
+            }
+        }
+        catch {
+            $results.passed = $false
+            $results.error = "Cleanup verification failed: $($_.Exception.Message)"
+            $results.cleanup = if ($cleanup) { $cleanup } else { [ordered]@{} }
+            $results.cleanup.passed = $false
+            $results.cleanup.error = $_.Exception.Message
+            $failure = $_
+        }
+    }
+    elseif ($results.passed) {
+        $results.cleanup = [ordered]@{
+            passed = $null
+            skipped = $true
+            reason = '-KeepInstalled was specified'
+        }
+    }
+
     $results.cathub_stdout = if (Test-Path -LiteralPath $stdoutPath) {
         Get-Content -LiteralPath $stdoutPath -Raw
     } else { '' }
     $results.cathub_stderr = if (Test-Path -LiteralPath $stderrPath) {
         Get-Content -LiteralPath $stderrPath -Raw
     } else { '' }
-    $results | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResultsPath -Encoding utf8
+    $results.events = [ordered]@{
+        system = Get-EventEvidence -LogName 'System' -StartTime $testStart
+        code_integrity = Get-EventEvidence `
+            -LogName 'Microsoft-Windows-CodeIntegrity/Operational' -StartTime $testStart
+        umdf = Get-EventEvidence `
+            -LogName 'Microsoft-Windows-DriverFrameworks-UserMode/Operational' `
+            -StartTime $testStart
+    }
+    $results.completed_at_utc = [DateTime]::UtcNow.ToString('o')
+    $results.duration_ms = [long]([DateTime]::UtcNow - $testStart).TotalMilliseconds
+    $results | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $ResultsPath -Encoding utf8
 }
 
+if ($failure) {
+    throw $failure
+}
 Write-Host "CatHub UMDF end-to-end test passed on $portName."
 Write-Host "Results: $ResultsPath"

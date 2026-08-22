@@ -93,3 +93,20 @@ The resulting package is suitable only for the isolated VM procedure in
 catalog-signing path and clean-system Secure Boot/Memory Integrity acceptance evidence. See the
 [signing decision gate](../design/virtual-serial-signing-decision.md) for the current provider
 research and required acceptance record.
+
+Run the development acceptance harness only from an elevated PowerShell session inside an isolated
+Hyper-V VM:
+
+```powershell
+cd C:\CatHubUmdfTest
+.\Test-UmdfEndToEnd.ps1 -IUnderstandThisInstallsATestDriver
+```
+
+The harness fails before installation unless Secure Boot and Memory Integrity are running and the
+boot configuration has neither test-signing mode nor integrity checks disabled. Its JSON evidence
+records the OS and boot policy, package manifest, catalog trust before and after importing the
+ephemeral test certificate, PnP driver metadata, serial I/O and recovery cases, and System, Code
+Integrity, and UMDF event logs. After a successful run it removes the endpoint, staged OEM driver
+package, and test certificate and verifies the resulting CatHub inventory. Pass `-KeepInstalled`
+only when retaining that isolated VM state is necessary for debugging; failed runs retain state so
+the original failure can be inspected before reverting the VM checkpoint.
