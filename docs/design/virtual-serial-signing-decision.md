@@ -17,8 +17,9 @@ Status: research complete; provider approval and clean-system evidence pending.
   dashboard account for attestation or WHCP submission:
   [Driver code signing requirements](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/code-signing-reqs).
 
-The repository's ephemeral self-signed catalog is development-test material only. It deliberately
-requires the isolated VM to trust its public test certificate and is not a production signing path.
+The repository's ephemeral self-signed DLL and catalog are development-test material only. The
+development target must trust the public test certificate and run with Windows Test Signing mode
+enabled. This is not a production signing path.
 
 ## SignPath request
 

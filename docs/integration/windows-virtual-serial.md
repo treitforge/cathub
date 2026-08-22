@@ -88,25 +88,33 @@ catalog without installing that certificate on the build workstation:
 .\scripts\Test-UmdfPoc.ps1 -Action Package
 ```
 
-The resulting package is suitable only for the isolated VM procedure in
+The resulting package is suitable only for the development-target procedure in
 `scripts/Test-UmdfEndToEnd.ps1`. Production distribution still requires the approved public
 catalog-signing path and clean-system Secure Boot/Memory Integrity acceptance evidence. See the
 [signing decision gate](../design/virtual-serial-signing-decision.md) for the current provider
 research and required acceptance record.
 
-Run the development acceptance harness only from an elevated PowerShell session inside an isolated
-Hyper-V VM:
+The self-signed development image requires
+[Windows Test Signing mode](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option).
+On a dedicated development target, disable Secure Boot, enable Test Signing, and reboot. Leave
+Memory Integrity enabled; the driver DLL remains signed and the harness rejects disabled integrity
+checks. Then run the harness from an elevated PowerShell session:
 
 ```powershell
+bcdedit.exe -set TESTSIGNING ON
+# Reboot before continuing.
 cd C:\CatHubUmdfTest
-.\Test-UmdfEndToEnd.ps1 -IUnderstandThisInstallsATestDriver
+.\Test-UmdfEndToEnd.ps1 `
+  -IUnderstandThisInstallsATestDriver `
+  -AllowSecureBootDisabled
 ```
 
-The harness fails before installation unless Secure Boot and Memory Integrity are running and the
-boot configuration has neither test-signing mode nor integrity checks disabled. Its JSON evidence
-records the OS and boot policy, package manifest, catalog trust before and after importing the
-ephemeral test certificate, PnP driver metadata, serial I/O and recovery cases, and System, Code
-Integrity, and UMDF event logs. Before starting the real CatHub daemon it also runs the native
+The harness fails before installation unless Test Signing and Memory Integrity are running,
+integrity checks remain enabled, and disabled Secure Boot was explicitly acknowledged. Its JSON
+evidence records the OS and boot policy, package manifest, catalog and embedded DLL trust before
+and after importing the ephemeral test certificate, PnP driver metadata, serial I/O and recovery
+cases, and System, Code Integrity, and UMDF event logs. Before starting the real CatHub daemon it
+also runs the native
 Win32 conformance suite through a loopback-only bridge to the private CHVS channel. That covers
 synchronous and overlapped I/O, pending-read cancellation, read timeouts, purge, `WaitCommEvent`,
 queue status, modem controls, atomic rejection beyond the 64 KiB buffer limit, recovery on the same
@@ -116,3 +124,7 @@ After a successful run it removes the endpoint, staged OEM driver package, and
 test certificate and verifies the resulting CatHub inventory. Pass `-KeepInstalled` only when
 retaining that isolated VM state is necessary for debugging; failed runs retain state so the
 original failure can be inspected before reverting the VM checkpoint.
+
+Normal-policy acceptance is a separate production-signing gate. After CatHub obtains a public or
+Microsoft driver signature, repeat the clean-system procedure with Secure Boot enabled and Test
+Signing disabled, without importing the development certificate.

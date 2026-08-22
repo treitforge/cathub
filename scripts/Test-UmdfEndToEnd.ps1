@@ -238,10 +238,6 @@ $isHyperVGuest = (
 if (-not $isHyperVGuest -and -not $AllowLocalMachine) {
     throw 'This test installs a private test certificate and driver. Use a Hyper-V VM or explicitly pass -AllowLocalMachine.'
 }
-if ($AllowSecureBootDisabled -and -not $AllowLocalMachine) {
-    throw '-AllowSecureBootDisabled is restricted to an explicitly authorized local-machine development run.'
-}
-
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -345,8 +341,8 @@ try {
     ) {
         throw 'Secure Boot is not enabled on the Windows test target.'
     }
-    if ($results.security.testsigning_enabled) {
-        throw 'Windows test-signing mode is enabled; the acceptance target must use normal policy.'
+    if (-not $results.security.testsigning_enabled) {
+        throw 'Windows test-signing mode is disabled; a self-signed development driver cannot pass Windows code-integrity policy. Enable TESTSIGNING and reboot the development target first.'
     }
     if ($results.security.no_integrity_checks_enabled) {
         throw 'Windows integrity checks are disabled; the acceptance target must use normal policy.'
@@ -377,6 +373,9 @@ try {
     }
     if ($results.signatures_after_trust.catalog.status -ne 'Valid') {
         throw "The installed catalog signature is not valid: $($results.signatures_after_trust.catalog.status_message)"
+    }
+    if ($results.signatures_after_trust.driver_dll.status -ne 'Valid') {
+        throw "The UMDF driver DLL's embedded signature is not valid: $($results.signatures_after_trust.driver_dll.status_message)"
     }
 
     $results.apply = Invoke-Captured $CatHubExe @(

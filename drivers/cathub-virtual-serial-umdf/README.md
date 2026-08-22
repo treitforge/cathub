@@ -29,6 +29,11 @@ driver build nor the packaging task follows a moving branch.
 - LLVM/libclang
 - `cargo-make` 0.37.16 or newer
 
+Running the self-signed package also requires a development target with Windows Test Signing mode
+enabled. Keep Memory Integrity enabled; the package embeds a signature in the driver DLL so HVCI
+does not permit unsigned code. Production installation under normal boot policy requires a public
+or Microsoft driver signature.
+
 An SDK-only installation is not enough.
 The check script automatically finds an installed WDK, `WDKContentRoot`, or the newest package
 under `%LOCALAPPDATA%\CatHub\wdk\packages`.
@@ -61,10 +66,12 @@ Produce a test-signed release package for an isolated driver-development target 
 ```
 
 The `Package` action generates a short-lived code-signing certificate without adding it to the
-host certificate store, signs the package catalog with `signtool`, deletes the private-key file,
-and leaves the public `cathub_umdf_test.cer` in the package for the isolated target. Building a
-package does not authorize installing its certificate or driver. Keep the public test certificate
-off normal operator machines.
+host certificate store, embeds a signature in the UMDF driver DLL, regenerates and signs the
+package catalog, deletes the private-key file, and leaves the public `cathub_umdf_test.cer` in the
+package for the development target. The image signature is required for UMDF code-integrity
+validation; it must be applied before catalog generation so the catalog contains the signed DLL's
+hash. Building a package does not authorize installing its certificate or driver. Keep the public
+test certificate off normal operator machines.
 
 ## Current safety boundary
 

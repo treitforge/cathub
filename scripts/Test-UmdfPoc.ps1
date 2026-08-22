@@ -253,6 +253,7 @@ try {
         $packageRoot = Join-Path $driverRoot `
             'target\x86_64-pc-windows-msvc\release\cathub_virtual_serial_umdf_package'
         $catalogPath = Join-Path $packageRoot 'cathub_virtual_serial_umdf.cat'
+        $driverBinaryPath = Join-Path $packageRoot 'cathub_virtual_serial_umdf.dll'
         $certificatePath = Join-Path $packageRoot 'cathub_umdf_test.cer'
         $manifestPath = Join-Path $packageRoot 'package-manifest.json'
         if (Test-Path -LiteralPath $manifestPath) {
@@ -266,6 +267,14 @@ try {
                 -PfxPath $pfxPath `
                 -CerPath $certificatePath `
                 -Password $password
+            # UMDF loads the driver DLL as integrity-protected code. Sign the image before
+            # regenerating the catalog so both the embedded signature and catalog hash are valid.
+            Invoke-Checked $signTool @(
+                'sign', '/v', '/fd', 'SHA256', '/f', $pfxPath, '/p', $password, $driverBinaryPath
+            )
+            Invoke-Checked inf2cat @(
+                "/driver:$packageRoot", '/os:10_X64', '/uselocaltime'
+            )
             Invoke-Checked $signTool @(
                 'sign', '/v', '/fd', 'SHA256', '/f', $pfxPath, '/p', $password, $catalogPath
             )
