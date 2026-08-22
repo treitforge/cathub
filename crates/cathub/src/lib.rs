@@ -45,7 +45,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(windows)]
+use cathub_virtual_serial::TEST_PEER_READY;
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(windows)]
+use tokio::io::AsyncWriteExt;
+#[cfg(windows)]
+use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -174,6 +180,37 @@ pub enum VirtualSerialCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
+    /// Expose the private managed transport over loopback TCP for the serial conformance harness.
+    #[command(hide = true)]
+    TestPeer {
+        /// Stable endpoint ID to attach to.
+        #[arg(long, default_value = "cathub-default")]
+        endpoint: String,
+        /// Provisioned endpoint kind.
+        #[arg(long, value_enum, default_value_t = ManagedEndpointKind::Cat)]
+        kind: ManagedEndpointKind,
+        /// Loopback address used by the conformance process.
+        #[arg(long, default_value = "127.0.0.1:39116")]
+        listen: SocketAddr,
+    },
+}
+
+/// Test-only managed endpoint kind used by the serial conformance bridge.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ManagedEndpointKind {
+    /// CAT radio endpoint.
+    Cat,
+    /// WinKeyer endpoint.
+    Winkeyer,
+}
+
+impl ManagedEndpointKind {
+    const fn code(self) -> u16 {
+        match self {
+            Self::Cat => 1,
+            Self::Winkeyer => 2,
+        }
+    }
 }
 
 /// CatHub configuration commands.
@@ -294,6 +331,7 @@ async fn open_radio_tcp(radio: &RadioConfig) -> std::io::Result<TcpStream> {
 pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     if let Some(command) = cli.command {
         return run_command(command, cli.config, cli.section.as_deref())
+            .await
             .map_err(CatHubError::Config);
     }
     let path = cli
@@ -664,7 +702,7 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     Ok(())
 }
 
-fn run_command(
+async fn run_command(
     command: Command,
     config_path: Option<PathBuf>,
     section: Option<&str>,
@@ -726,12 +764,12 @@ fn run_command(
             }
         },
         Command::VirtualSerial { command } => {
-            run_virtual_serial_command(command, config_path.as_deref(), section)
+            run_virtual_serial_command(command, config_path.as_deref(), section).await
         }
     }
 }
 
-fn run_virtual_serial_command(
+async fn run_virtual_serial_command(
     command: VirtualSerialCommand,
     config_path: Option<&std::path::Path>,
     section: Option<&str>,
@@ -779,7 +817,56 @@ fn run_virtual_serial_command(
             let report = provisioning::remove(&endpoints).map_err(error::ConfigError::Invalid)?;
             print_report(&report, format)
         }
+        VirtualSerialCommand::TestPeer {
+            endpoint,
+            kind,
+            listen,
+        } => run_managed_test_peer(&endpoint, kind.code(), listen).await,
     }
+}
+
+#[cfg(windows)]
+async fn run_managed_test_peer(
+    stable_id: &str,
+    expected_kind: u16,
+    listen: SocketAddr,
+) -> Result<(), error::ConfigError> {
+    if !listen.ip().is_loopback() {
+        return Err(error::ConfigError::Invalid(
+            "managed serial test peer must listen on a loopback address".to_string(),
+        ));
+    }
+    let listener = TcpListener::bind(listen).await?;
+    println!(
+        "managed virtual serial test peer listening on {}",
+        listener.local_addr()?
+    );
+
+    loop {
+        let (mut socket, peer) = listener.accept().await?;
+        tracing::debug!(%peer, %stable_id, "serial conformance peer connected");
+        let mut managed = managed_virtual_serial::open(stable_id, expected_kind)
+            .await
+            .map_err(error::ConfigError::Io)?;
+        if let Err(error) = socket.write_all(TEST_PEER_READY).await {
+            tracing::warn!(%peer, %error, "serial conformance readiness write failed");
+            continue;
+        }
+        if let Err(error) = tokio::io::copy_bidirectional(&mut socket, &mut managed).await {
+            tracing::warn!(%peer, %error, "serial conformance peer bridge failed");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn run_managed_test_peer(
+    _stable_id: &str,
+    _expected_kind: u16,
+    _listen: SocketAddr,
+) -> std::future::Ready<Result<(), error::ConfigError>> {
+    std::future::ready(Err(error::ConfigError::Invalid(
+        "managed virtual serial test peer requires Windows".to_string(),
+    )))
 }
 
 /// Open the physical WinKeyer using the protocol-mandated 8-N-2 framing.

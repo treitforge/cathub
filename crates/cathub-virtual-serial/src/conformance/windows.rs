@@ -1,6 +1,8 @@
 #![allow(unsafe_code, clippy::borrow_as_ptr)]
 
+use std::io::{Read, Write};
 use std::mem::{size_of, zeroed};
+use std::net::{SocketAddr, TcpStream};
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,11 +26,27 @@ use super::{
     ApplicationProfile, CaseId, CaseResult, CaseStatus, ConformanceError, ConformanceReport,
     ProfileCase,
 };
+use crate::TEST_PEER_READY;
 
 const IO_WAIT_MS: u32 = 2_000;
 const TEST_DATA: &[u8] = b"CatHub serial conformance";
 
-pub(super) fn run(
+#[derive(Clone, Copy)]
+enum PeerTarget<'a> {
+    Serial(&'a str),
+    Tcp(SocketAddr),
+}
+
+impl PeerTarget<'_> {
+    fn report_name(self) -> String {
+        match self {
+            Self::Serial(port) => port.to_string(),
+            Self::Tcp(address) => format!("tcp://{address}"),
+        }
+    }
+}
+
+pub(super) fn run_serial_pair(
     profile: &ApplicationProfile,
     application_port: &str,
     peer_port: &str,
@@ -38,44 +56,65 @@ pub(super) fn run(
             "application and peer ports must be different".to_string(),
         ));
     }
+    Ok(run(
+        profile,
+        application_port,
+        PeerTarget::Serial(peer_port),
+    ))
+}
+
+pub(super) fn run_tcp_peer(
+    profile: &ApplicationProfile,
+    application_port: &str,
+    peer_address: SocketAddr,
+) -> ConformanceReport {
+    run(profile, application_port, PeerTarget::Tcp(peer_address))
+}
+
+fn run(
+    profile: &ApplicationProfile,
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> ConformanceReport {
+    let peer_name = peer_target.report_name();
 
     let results = profile
         .cases
         .iter()
-        .map(|case| run_case(*case, profile, application_port, peer_port))
+        .map(|case| run_case(*case, profile, application_port, peer_target))
         .collect();
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    Ok(ConformanceReport {
+    ConformanceReport {
         schema_version: 1,
         generated_at_utc: format!("unix:{seconds}"),
         profile: profile.name.to_string(),
         application_port: application_port.to_string(),
-        peer_port: peer_port.to_string(),
+        peer_port: peer_name,
         operating_system: "Windows".to_string(),
         results,
-    })
+    }
 }
 
 fn run_case(
     profile_case: ProfileCase,
     profile: &ApplicationProfile,
     application_port: &str,
-    peer_port: &str,
+    peer_target: PeerTarget<'_>,
 ) -> CaseResult {
     let result = match profile_case.id {
-        CaseId::SynchronousIo => synchronous_io(application_port, peer_port),
-        CaseId::OverlappedIo => overlapped_io(application_port, peer_port),
+        CaseId::SynchronousIo => synchronous_io(application_port, peer_target),
+        CaseId::OverlappedIo => overlapped_io(application_port, peer_target),
         CaseId::CancelPendingRead => cancel_pending_read(application_port),
         CaseId::ReadTimeout => read_timeout(application_port),
-        CaseId::PurgeReceive => purge_receive(application_port, peer_port),
-        CaseId::WaitCommEvent => wait_comm_event(application_port, peer_port),
+        CaseId::PurgeReceive => purge_receive(application_port, peer_target),
+        CaseId::WaitCommEvent => wait_comm_event(application_port, peer_target),
         CaseId::SerialConfiguration => serial_configuration(application_port, profile),
         CaseId::ModemControl => modem_control(application_port),
-        CaseId::QueueStatus => queue_status(application_port, peer_port),
+        CaseId::QueueStatus => queue_status(application_port, peer_target),
     };
 
     match result {
@@ -99,33 +138,40 @@ fn run_case(
     }
 }
 
-fn synchronous_io(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn synchronous_io(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, false)?;
-    let peer = Port::open(peer_port, false)?;
+    let mut peer = Peer::open(peer_target)?;
     set_timeout(application.handle(), 500)?;
-    set_timeout(peer.handle(), 500)?;
+    peer.set_timeout(Duration::from_millis(500))?;
 
     write_sync(application.handle(), TEST_DATA)?;
-    let received = read_sync(peer.handle(), TEST_DATA.len())?;
+    let received = peer.read_exact(TEST_DATA.len())?;
     require_equal("synchronous application write", &received, TEST_DATA)?;
 
     let reply = b"CatHub synchronous reply";
-    write_sync(peer.handle(), reply)?;
+    peer.write_all(reply)?;
     let received = read_sync(application.handle(), reply.len())?;
     require_equal("synchronous application read", &received, reply)?;
     Ok("blocking reads and writes transferred bytes in both directions".to_string())
 }
 
-fn overlapped_io(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn overlapped_io(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, true)?;
-    let peer = Port::open(peer_port, true)?;
+    let mut peer = Peer::open(peer_target)?;
+    peer.set_timeout(Duration::from_millis(IO_WAIT_MS.into()))?;
 
     write_overlapped(application.handle(), TEST_DATA)?;
-    let received = read_overlapped(peer.handle(), TEST_DATA.len())?;
+    let received = peer.read_exact(TEST_DATA.len())?;
     require_equal("overlapped application write", &received, TEST_DATA)?;
 
     let reply = b"CatHub overlapped reply";
-    write_overlapped(peer.handle(), reply)?;
+    peer.write_all(reply)?;
     let received = read_overlapped(application.handle(), reply.len())?;
     require_equal("overlapped application read", &received, reply)?;
     Ok("overlapped reads and writes transferred bytes in both directions".to_string())
@@ -195,11 +241,14 @@ fn read_timeout(application_port: &str) -> Result<String, ConformanceError> {
     ))
 }
 
-fn purge_receive(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn purge_receive(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, false)?;
-    let peer = Port::open(peer_port, false)?;
+    let mut peer = Peer::open(peer_target)?;
     set_timeout(application.handle(), 500)?;
-    write_sync(peer.handle(), TEST_DATA)?;
+    peer.write_all(TEST_DATA)?;
     std::thread::sleep(Duration::from_millis(50));
     let before = queue_depth(application.handle())?;
     if before == 0 {
@@ -219,9 +268,12 @@ fn purge_receive(application_port: &str, peer_port: &str) -> Result<String, Conf
     Ok(format!("purge removed {before} queued bytes"))
 }
 
-fn wait_comm_event(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn wait_comm_event(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, true)?;
-    let peer = Port::open(peer_port, true)?;
+    let mut peer = Peer::open(peer_target)?;
     if unsafe { SetCommMask(application.handle(), EV_RXCHAR) } == 0 {
         return Err(last_error("SetCommMask"));
     }
@@ -236,7 +288,7 @@ fn wait_comm_event(application_port: &str, peer_port: &str) -> Result<String, Co
             return Err(win32("WaitCommEvent", error));
         }
     }
-    write_overlapped(peer.handle(), b"E")?;
+    peer.write_all(b"E")?;
     if started == 0 {
         wait_event(event.handle(), IO_WAIT_MS, "WaitCommEvent")?;
         let mut transferred = 0u32;
@@ -327,11 +379,14 @@ fn modem_control(application_port: &str) -> Result<String, ConformanceError> {
     Ok("DTR, RTS, and break control requests completed".to_string())
 }
 
-fn queue_status(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn queue_status(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, false)?;
-    let peer = Port::open(peer_port, false)?;
+    let mut peer = Peer::open(peer_target)?;
     set_timeout(application.handle(), 500)?;
-    write_sync(peer.handle(), TEST_DATA)?;
+    peer.write_all(TEST_DATA)?;
     std::thread::sleep(Duration::from_millis(50));
     let depth = queue_depth(application.handle())?;
     if depth < u32::try_from(TEST_DATA.len()).unwrap_or(u32::MAX) {
@@ -540,6 +595,70 @@ impl Port {
 impl Drop for Port {
     fn drop(&mut self) {
         let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+enum Peer {
+    Serial(Port),
+    Tcp(TcpStream),
+}
+
+impl Peer {
+    fn open(target: PeerTarget<'_>) -> Result<Self, ConformanceError> {
+        match target {
+            PeerTarget::Serial(port) => Ok(Self::Serial(Port::open(port, false)?)),
+            PeerTarget::Tcp(address) => {
+                let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+                stream.set_nodelay(true)?;
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let mut ready = [0_u8; TEST_PEER_READY.len()];
+                Read::read_exact(&mut stream, &mut ready)?;
+                if ready != TEST_PEER_READY {
+                    return Err(ConformanceError::InvalidResult(
+                        "managed test peer returned an invalid readiness preface".to_string(),
+                    ));
+                }
+                Ok(Self::Tcp(stream))
+            }
+        }
+    }
+
+    fn set_timeout(&self, timeout: Duration) -> Result<(), ConformanceError> {
+        match self {
+            Self::Serial(port) => {
+                let milliseconds = u32::try_from(timeout.as_millis()).map_err(|_| {
+                    ConformanceError::InvalidResult("peer timeout exceeds u32".to_string())
+                })?;
+                set_timeout(port.handle(), milliseconds)
+            }
+            Self::Tcp(stream) => {
+                stream.set_read_timeout(Some(timeout))?;
+                stream.set_write_timeout(Some(timeout))?;
+                Ok(())
+            }
+        }
+    }
+
+    fn read_exact(&mut self, length: usize) -> Result<Vec<u8>, ConformanceError> {
+        match self {
+            Self::Serial(port) => read_sync(port.handle(), length),
+            Self::Tcp(stream) => {
+                let mut bytes = vec![0_u8; length];
+                Read::read_exact(stream, &mut bytes)?;
+                Ok(bytes)
+            }
+        }
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), ConformanceError> {
+        match self {
+            Self::Serial(port) => write_sync(port.handle(), bytes),
+            Self::Tcp(stream) => {
+                Write::write_all(stream, bytes)?;
+                Write::flush(stream)?;
+                Ok(())
+            }
+        }
     }
 }
 

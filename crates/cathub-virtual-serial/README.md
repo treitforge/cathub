@@ -23,3 +23,18 @@ cargo run -p cathub-virtual-serial --bin serial-conformance -- run `
 ```
 
 Do not use a physical radio or a physical WinKeyer for this test.
+
+For an installed CatHub-owned UMDF endpoint, start CatHub's hidden loopback-only test peer and use
+the private-channel conformance mode instead of creating a second COM port:
+
+```powershell
+cathub virtual-serial test-peer --endpoint cathub-default `
+  --kind cat --listen 127.0.0.1:39116
+
+serial-conformance run --application-port COM91 `
+  --peer-tcp 127.0.0.1:39116 --profile n1mm-radio `
+  --output artifacts\serial-conformance\managed-n1mm-radio.json
+```
+
+The test peer binds only the explicitly supplied address; the isolated-target harness always uses
+IPv4 loopback and terminates it before starting the production daemon path.

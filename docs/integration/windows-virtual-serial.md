@@ -106,7 +106,11 @@ The harness fails before installation unless Secure Boot and Memory Integrity ar
 boot configuration has neither test-signing mode nor integrity checks disabled. Its JSON evidence
 records the OS and boot policy, package manifest, catalog trust before and after importing the
 ephemeral test certificate, PnP driver metadata, serial I/O and recovery cases, and System, Code
-Integrity, and UMDF event logs. After a successful run it removes the endpoint, staged OEM driver
-package, and test certificate and verifies the resulting CatHub inventory. Pass `-KeepInstalled`
-only when retaining that isolated VM state is necessary for debugging; failed runs retain state so
-the original failure can be inspected before reverting the VM checkpoint.
+Integrity, and UMDF event logs. Before starting the real CatHub daemon it also runs the native
+Win32 conformance suite through a loopback-only bridge to the private CHVS channel. That covers
+synchronous and overlapped I/O, pending-read cancellation, read timeouts, purge, `WaitCommEvent`,
+queue status, modem controls, and both CAT 8-N-1 and WinKeyer 8-N-2 line formats without recreating
+a second COM port. After a successful run it removes the endpoint, staged OEM driver package, and
+test certificate and verifies the resulting CatHub inventory. Pass `-KeepInstalled` only when
+retaining that isolated VM state is necessary for debugging; failed runs retain state so the
+original failure can be inspected before reverting the VM checkpoint.

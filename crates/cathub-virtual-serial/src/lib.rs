@@ -9,3 +9,7 @@
 pub mod conformance;
 pub mod daemon;
 pub mod protocol;
+
+/// Readiness preface used by the loopback-only managed serial conformance bridge.
+#[doc(hidden)]
+pub const TEST_PEER_READY: &[u8] = b"CHVS-TEST-READY\n";

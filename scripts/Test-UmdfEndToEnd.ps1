@@ -5,6 +5,7 @@ param(
 
     [string]$DriverPackage = (Join-Path $PSScriptRoot 'driver'),
     [string]$CatHubExe = (Join-Path $PSScriptRoot 'cathub.exe'),
+    [string]$ConformanceExe = (Join-Path $PSScriptRoot 'serial-conformance.exe'),
     [string]$ResultsPath = (Join-Path $PSScriptRoot 'cathub-umdf-e2e.json'),
 
     [switch]$KeepInstalled
@@ -253,7 +254,8 @@ foreach ($path in @(
     $catalogPath,
     $driverDllPath,
     $manifestPath,
-    $CatHubExe
+    $CatHubExe,
+    $ConformanceExe
 )) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required test input is missing: $path"
@@ -264,6 +266,8 @@ $workRoot = Join-Path $env:TEMP 'cathub-umdf-e2e'
 $configPath = Join-Path $workRoot 'cathub.toml'
 $stdoutPath = Join-Path $workRoot 'cathub.stdout.log'
 $stderrPath = Join-Path $workRoot 'cathub.stderr.log'
+$peerStdoutPath = Join-Path $workRoot 'test-peer.stdout.log'
+$peerStderrPath = Join-Path $workRoot 'test-peer.stderr.log'
 $null = New-Item -ItemType Directory -Path $workRoot -Force
 
 @'
@@ -289,6 +293,7 @@ $device = $null
 $portName = $null
 $publishedInf = $null
 $process = $null
+$peerProcess = $null
 $serial = $null
 $failure = $null
 $results = [ordered]@{
@@ -304,6 +309,7 @@ $results = [ordered]@{
     package_integrity = Get-PackageIntegrityEvidence `
         -PackageRoot $DriverPackage -Manifest $packageManifest
     cathub_exe_sha256 = (Get-FileHash -LiteralPath $CatHubExe -Algorithm SHA256).Hash
+    conformance_exe_sha256 = (Get-FileHash -LiteralPath $ConformanceExe -Algorithm SHA256).Hash
     harness_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
     signatures_before_trust = [ordered]@{
         catalog = Get-SignatureEvidence -Path $catalogPath
@@ -374,6 +380,57 @@ try {
     $results.device_instance_id = $device.InstanceId
     $results.pnp_after_install = Get-PnpEvidence -InstanceId $device.InstanceId
     $publishedInf = $results.pnp_after_install.properties['DEVPKEY_Device_DriverInfPath']
+
+    $portProbe = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        0
+    )
+    $portProbe.Start()
+    $peerPort = ([System.Net.IPEndPoint]$portProbe.LocalEndpoint).Port
+    $portProbe.Stop()
+    $peerAddress = "127.0.0.1:$peerPort"
+    $peerProcess = Start-Process -FilePath $CatHubExe `
+        -ArgumentList @(
+            'virtual-serial', 'test-peer',
+            '--endpoint', 'cathub-default',
+            '--kind', 'cat',
+            '--listen', $peerAddress
+        ) `
+        -RedirectStandardOutput $peerStdoutPath `
+        -RedirectStandardError $peerStderrPath `
+        -PassThru
+    Start-Sleep -Seconds 1
+    if ($peerProcess.HasExited) {
+        throw "The managed serial test peer exited with code $($peerProcess.ExitCode)."
+    }
+
+    $results.serial_conformance = [ordered]@{}
+    foreach ($profile in @('n1mm-radio', 'n1mm-winkeyer')) {
+        $reportPath = Join-Path $workRoot "serial-conformance-$profile.json"
+        $run = Invoke-Captured $ConformanceExe @(
+            'run',
+            '--application-port', $portName,
+            '--peer-tcp', $peerAddress,
+            '--profile', $profile,
+            '--output', $reportPath
+        )
+        if ($run.exit_code -ne 0) {
+            throw "Serial conformance profile '$profile' failed: $($run.output)"
+        }
+        $results.serial_conformance[$profile] = [ordered]@{
+            command = $run
+            report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+        }
+    }
+    Stop-Process -Id $peerProcess.Id -Force
+    $peerProcess.WaitForExit()
+    $peerProcess = $null
+    Start-Sleep -Milliseconds 500
+    $results.cases += [ordered]@{
+        name = 'native_serial_api_conformance'
+        passed = $true
+        profiles = @('n1mm-radio', 'n1mm-winkeyer')
+    }
 
     $process = Start-Process -FilePath $CatHubExe `
         -ArgumentList @('--config', $configPath) `
@@ -608,6 +665,10 @@ finally {
         Stop-Process -Id $process.Id -Force
         $process.WaitForExit()
     }
+    if ($peerProcess -and -not $peerProcess.HasExited) {
+        Stop-Process -Id $peerProcess.Id -Force
+        $peerProcess.WaitForExit()
+    }
 
     if ($results.passed -and -not $KeepInstalled) {
         try {
@@ -688,6 +749,12 @@ finally {
     } else { '' }
     $results.cathub_stderr = if (Test-Path -LiteralPath $stderrPath) {
         Get-Content -LiteralPath $stderrPath -Raw
+    } else { '' }
+    $results.test_peer_stdout = if (Test-Path -LiteralPath $peerStdoutPath) {
+        Get-Content -LiteralPath $peerStdoutPath -Raw
+    } else { '' }
+    $results.test_peer_stderr = if (Test-Path -LiteralPath $peerStderrPath) {
+        Get-Content -LiteralPath $peerStderrPath -Raw
     } else { '' }
     $results.events = [ordered]@{
         system = Get-EventEvidence -LogName 'System' -StartTime $testStart
