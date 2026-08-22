@@ -15,14 +15,14 @@ use std::{
 
 use wdk::println;
 use wdk_sys::{
-    _SECURITY_IMPERSONATION_LEVEL, _WDF_EXECUTION_LEVEL, _WDF_FILEOBJECT_CLASS,
-    _WDF_IO_QUEUE_DISPATCH_TYPE, _WDF_SYNCHRONIZATION_SCOPE, _WDF_TRI_STATE, BOOLEAN, GUID,
-    KEY_QUERY_VALUE, KEY_SET_VALUE, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT,
-    PLUGPLAY_REGKEY_DEVICE, PVOID, ULONG, ULONG_PTR, UNICODE_STRING, WDF_DRIVER_CONFIG,
-    WDF_FILEOBJECT_CONFIG, WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
-    WDF_OBJECT_ATTRIBUTES, WDF_OBJECT_CONTEXT_TYPE_INFO, WDF_TIMER_CONFIG, WDFDEVICE,
-    WDFDEVICE_INIT, WDFDRIVER, WDFFILEOBJECT, WDFKEY, WDFOBJECT, WDFQUEUE, WDFQUEUE__, WDFREQUEST,
-    WDFTIMER, call_unsafe_wdf_function_binding,
+    _POOL_TYPE, _SECURITY_IMPERSONATION_LEVEL, _WDF_EXECUTION_LEVEL, _WDF_FILEOBJECT_CLASS,
+    _WDF_IO_QUEUE_DISPATCH_TYPE, _WDF_SYNCHRONIZATION_SCOPE, _WDF_TRI_STATE, BOOLEAN,
+    DEVICE_REGISTRY_PROPERTY, GUID, KEY_QUERY_VALUE, KEY_SET_VALUE, NTSTATUS, PCUNICODE_STRING,
+    PDRIVER_OBJECT, PLUGPLAY_REGKEY_DEVICE, PVOID, ULONG, ULONG_PTR, UNICODE_STRING,
+    WDF_DRIVER_CONFIG, WDF_FILEOBJECT_CONFIG, WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE,
+    WDF_NO_OBJECT_ATTRIBUTES, WDF_OBJECT_ATTRIBUTES, WDF_OBJECT_CONTEXT_TYPE_INFO,
+    WDF_TIMER_CONFIG, WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER, WDFFILEOBJECT, WDFKEY, WDFMEMORY,
+    WDFOBJECT, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER, call_unsafe_wdf_function_binding,
 };
 use windows_sys::Win32::Security::{CheckTokenMembership, GetLengthSid, IsValidSid};
 
@@ -70,6 +70,7 @@ const STARTUP_STATUS_VALUE: [u16; 20] = [
 const DOS_DEVICE_PREFIX: &[u16] = &[
     92, 68, 111, 115, 68, 101, 118, 105, 99, 101, 115, 92, 71, 108, 111, 98, 97, 108, 92,
 ];
+const SERIAL_DEVICE_MAP: [u16; 11] = [83, 69, 82, 73, 65, 76, 67, 79, 77, 77, 0];
 
 /// Private `CatHub` daemon interface, `{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`.
 static CATHUB_POC_INTERFACE_GUID: GUID = GUID {
@@ -90,6 +91,8 @@ static GUID_DEVINTERFACE_COMPORT: GUID = GUID {
 #[repr(C)]
 struct DeviceContext {
     state: *mut DeviceState,
+    pdo_name: UNICODE_STRING,
+    legacy_serial_map_created: bool,
 }
 
 struct DeviceState {
@@ -320,6 +323,7 @@ unsafe fn create_device(mut device_init: *mut WDFDEVICE_INIT) -> NTSTATUS {
 
     let mut device_attributes = WDF_OBJECT_ATTRIBUTES {
         Size: struct_size::<WDF_OBJECT_ATTRIBUTES>(),
+        EvtCleanupCallback: Some(evt_device_cleanup),
         EvtDestroyCallback: Some(evt_device_context_destroy),
         ExecutionLevel: _WDF_EXECUTION_LEVEL::WdfExecutionLevelPassive,
         SynchronizationScope: _WDF_SYNCHRONIZATION_SCOPE::WdfSynchronizationScopeNone,
@@ -534,7 +538,17 @@ unsafe fn register_interfaces(device: WDFDEVICE) -> NTSTATUS {
         return status;
     }
     // SAFETY: The device instance key and PortName value are owned by Windows Ports setup.
-    let status = unsafe { create_com_symbolic_link(device) };
+    let port_name = match unsafe { read_port_name(device) } {
+        Ok(port_name) => port_name,
+        Err(status) => return status,
+    };
+    // SAFETY: The device is live and the port name remains valid through the synchronous call.
+    let status = unsafe { create_com_symbolic_link(device, &port_name) };
+    if !nt_success(status) {
+        return status;
+    }
+    // SAFETY: The device and port-name buffer remain live through registration.
+    let status = unsafe { register_legacy_serial_map(device, &port_name) };
     if !nt_success(status) {
         return status;
     }
@@ -662,7 +676,7 @@ unsafe fn query_registry_binary(key: WDFKEY, value: &[u16], maximum: usize) -> O
     (nt_success(status) && value_type == 3).then_some(buffer)
 }
 
-unsafe fn create_com_symbolic_link(device: WDFDEVICE) -> NTSTATUS {
+unsafe fn read_port_name(device: WDFDEVICE) -> Result<Vec<u16>, NTSTATUS> {
     let mut key: WDFKEY = ptr::null_mut();
     // SAFETY: The device is live, null attributes are allowed, and output storage is valid.
     let status = unsafe {
@@ -676,7 +690,7 @@ unsafe fn create_com_symbolic_link(device: WDFDEVICE) -> NTSTATUS {
         )
     };
     if !nt_success(status) {
-        return status;
+        return Err(status);
     }
 
     let value_name = unicode_string(&PORT_NAME_VALUE);
@@ -695,15 +709,23 @@ unsafe fn create_com_symbolic_link(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: This driver owns the WDF registry-key handle returned above.
     unsafe { call_unsafe_wdf_function_binding!(WdfRegistryClose, key) };
     if !nt_success(query_status) {
-        return query_status;
+        return Err(query_status);
     }
     let port_units = usize::from(port_name.Length) / size_of::<u16>();
     if port_units == 0 || port_units >= port_buffer.len() {
-        return STATUS_OBJECT_NAME_INVALID;
+        return Err(STATUS_OBJECT_NAME_INVALID);
     }
+    let mut port_name = Vec::with_capacity(port_units + 1);
+    port_name.extend_from_slice(port_buffer.get(..port_units).unwrap_or_default());
+    port_name.push(0);
+    Ok(port_name)
+}
+
+unsafe fn create_com_symbolic_link(device: WDFDEVICE, port_name: &[u16]) -> NTSTATUS {
+    let port_units = port_name.len().saturating_sub(1);
     let mut link = Vec::with_capacity(DOS_DEVICE_PREFIX.len() + port_units + 1);
     link.extend_from_slice(DOS_DEVICE_PREFIX);
-    link.extend_from_slice(port_buffer.get(..port_units).unwrap_or_default());
+    link.extend_from_slice(port_name.get(..port_units).unwrap_or_default());
     link.push(0);
     let symbolic_link = unicode_string(&link);
     // SAFETY: The device is live and the counted link string remains valid synchronously.
@@ -714,6 +736,102 @@ unsafe fn create_com_symbolic_link(device: WDFDEVICE) -> NTSTATUS {
             &raw const symbolic_link,
         )
     }
+}
+
+unsafe fn register_legacy_serial_map(device: WDFDEVICE, port_name: &[u16]) -> NTSTATUS {
+    // SAFETY: The caller supplies the live device created with this driver's typed context.
+    let Some(context) = (unsafe { device_context(device) }) else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    let mut memory_attributes = WDF_OBJECT_ATTRIBUTES {
+        Size: struct_size::<WDF_OBJECT_ATTRIBUTES>(),
+        ParentObject: device.cast(),
+        ..WDF_OBJECT_ATTRIBUTES::default()
+    };
+    let mut memory: WDFMEMORY = ptr::null_mut();
+    // SAFETY: WDF owns the device and creates device-parented storage for the PDO name.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceAllocAndQueryProperty,
+            device,
+            DEVICE_REGISTRY_PROPERTY::DevicePropertyPhysicalDeviceObjectName,
+            _POOL_TYPE::NonPagedPoolNx,
+            &raw mut memory_attributes,
+            &raw mut memory,
+        )
+    };
+    if !nt_success(status) {
+        return status;
+    }
+    let mut byte_length = 0_usize;
+    // SAFETY: The successful property query returned a live device-parented memory object.
+    let buffer = unsafe {
+        call_unsafe_wdf_function_binding!(WdfMemoryGetBuffer, memory, &raw mut byte_length)
+    };
+    if buffer.is_null()
+        || byte_length < size_of::<u16>()
+        || !byte_length.is_multiple_of(size_of::<u16>())
+    {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    let units = byte_length / size_of::<u16>();
+    // SAFETY: WDF reports the exact allocation length and the property is a UTF-16 string.
+    let pdo_buffer = unsafe { slice::from_raw_parts_mut(buffer.cast::<u16>(), units) };
+    let content_units = pdo_buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(pdo_buffer.len());
+    if content_units == 0 || content_units >= pdo_buffer.len() {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    let content_bytes = content_units.saturating_mul(size_of::<u16>());
+    let maximum_bytes = (content_units + 1).saturating_mul(size_of::<u16>());
+    let pdo_name = UNICODE_STRING {
+        Length: u16::try_from(content_bytes).unwrap_or(u16::MAX),
+        MaximumLength: u16::try_from(maximum_bytes).unwrap_or(u16::MAX),
+        Buffer: pdo_buffer.as_mut_ptr(),
+    };
+    if usize::from(pdo_name.Length) != content_bytes
+        || usize::from(pdo_name.MaximumLength) != maximum_bytes
+    {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    let map_name = unicode_string(&SERIAL_DEVICE_MAP);
+    let mut key: WDFKEY = ptr::null_mut();
+    // SAFETY: WDF opens the system device-map key and returns an owned key handle.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceOpenDevicemapKey,
+            device,
+            &raw const map_name,
+            KEY_SET_VALUE,
+            WDF_NO_OBJECT_ATTRIBUTES,
+            &raw mut key,
+        )
+    };
+    if !nt_success(status) {
+        return status;
+    }
+    let com_name = unicode_string(port_name);
+    // SAFETY: Both counted strings and the key remain live through the synchronous assignment.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRegistryAssignUnicodeString,
+            key,
+            &raw const pdo_name,
+            &raw const com_name,
+        )
+    };
+    // SAFETY: This function owns the WDF registry-key handle returned above.
+    unsafe { call_unsafe_wdf_function_binding!(WdfRegistryClose, key) };
+    if nt_success(status) {
+        // SAFETY: The device context is exclusively initialized before interfaces are published.
+        unsafe { (*context).pdo_name = pdo_name };
+        // SAFETY: The device context is exclusively initialized before interfaces are published.
+        unsafe { (*context).legacy_serial_map_created = true };
+    }
+    status
 }
 
 unsafe extern "C" fn evt_device_file_create(
@@ -1748,6 +1866,45 @@ unsafe fn device_state_from_queue<'device>(queue: WDFQUEUE) -> Option<&'device D
     }
     // SAFETY: The queue keeps its parent device alive for the callback's duration.
     unsafe { device_state(device) }
+}
+
+unsafe extern "C" fn evt_device_cleanup(object: WDFOBJECT) {
+    ffi_void(|| {
+        let device: WDFDEVICE = object.cast();
+        // SAFETY: WDF invokes cleanup while the device context and device-parented PDO-name memory
+        // remain live, matching the lifetime used by the VirtualSerial2 reference driver.
+        let Some(context) = (unsafe { device_context(device) }) else {
+            return;
+        };
+        // SAFETY: This callback is the sole remover and the context remains live for its duration.
+        if !unsafe { (*context).legacy_serial_map_created } {
+            return;
+        }
+        let map_name = unicode_string(&SERIAL_DEVICE_MAP);
+        let mut key: WDFKEY = ptr::null_mut();
+        // SAFETY: The device is still valid during its cleanup callback and output storage is live.
+        let status = unsafe {
+            call_unsafe_wdf_function_binding!(
+                WdfDeviceOpenDevicemapKey,
+                device,
+                &raw const map_name,
+                KEY_SET_VALUE,
+                WDF_NO_OBJECT_ATTRIBUTES,
+                &raw mut key,
+            )
+        };
+        if !nt_success(status) {
+            return;
+        }
+        // SAFETY: Successful registration stored this counted string in device-parented memory.
+        let pdo_name = unsafe { &raw const (*context).pdo_name };
+        // SAFETY: Remove only this device's value; never remove the shared SERIALCOMM key.
+        let _ = unsafe { call_unsafe_wdf_function_binding!(WdfRegistryRemoveValue, key, pdo_name) };
+        // SAFETY: This callback owns the WDF registry-key handle returned above.
+        unsafe { call_unsafe_wdf_function_binding!(WdfRegistryClose, key) };
+        // SAFETY: Cleanup runs once before the context is destroyed.
+        unsafe { (*context).legacy_serial_map_created = false };
+    });
 }
 
 unsafe extern "C" fn evt_device_context_destroy(object: WDFOBJECT) {

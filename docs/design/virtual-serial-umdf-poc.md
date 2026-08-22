@@ -110,7 +110,8 @@ The unsafe surface remains isolated in one module, `src/interop.rs`:
 - `WdfDriverCreate`
 - device-add callback and `WdfDeviceCreate`
 - file create and cleanup callbacks
-- private device-interface registration
+- public COM and private device-interface registration
+- global COM symbolic-link and legacy `SERIALCOMM` device-map lifecycle
 - default and manual queue creation
 - typed device-context registration, lookup, and destroy cleanup
 - request forwarding, retrieval, cancellation, and completion

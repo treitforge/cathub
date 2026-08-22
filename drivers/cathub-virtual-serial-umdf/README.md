@@ -6,8 +6,9 @@ configuration per Cargo build graph.
 
 The current driver installs as a Ports-class WDF device, registers `GUID_DEVINTERFACE_COMPORT`,
 uses the COM number assigned by the Windows Ports class installer, and creates the corresponding
-global `COMx` symbolic link. It also registers the reference-named `daemon` instance of the private
-CatHub interface `{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`.
+global `COMx` symbolic link and `HARDWARE\DEVICEMAP\SERIALCOMM` entry used by legacy enumerators.
+It also registers the reference-named `daemon` instance of the private CatHub interface
+`{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`.
 Do not install it on the working station.
 
 ## Pinned inputs

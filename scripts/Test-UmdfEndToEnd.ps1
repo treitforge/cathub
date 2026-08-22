@@ -395,6 +395,27 @@ try {
     $results.pnp_after_install = Get-PnpEvidence -InstanceId $device.InstanceId
     $publishedInf = $results.pnp_after_install.properties['DEVPKEY_Device_DriverInfPath']
 
+    $serialMapKey = Get-Item -LiteralPath `
+        'Registry::HKEY_LOCAL_MACHINE\HARDWARE\DEVICEMAP\SERIALCOMM' `
+        -ErrorAction Stop
+    $serialMapValues = @(
+        $serialMapKey.GetValueNames() |
+            Where-Object { $serialMapKey.GetValue($_) -eq $portName }
+    )
+    if ($serialMapValues.Count -ne 1) {
+        throw "Expected exactly one SERIALCOMM registration for '$portName', found $($serialMapValues.Count)."
+    }
+    $enumeratedPorts = @([System.IO.Ports.SerialPort]::GetPortNames())
+    if ($portName -notin $enumeratedPorts) {
+        throw "System.IO.Ports did not enumerate the CatHub port '$portName'."
+    }
+    $results.cases += [ordered]@{
+        name = 'windows_serial_port_discovery'
+        passed = $true
+        serialcomm_value = $serialMapValues[0]
+        system_io_ports = $enumeratedPorts
+    }
+
     $portProbe = [System.Net.Sockets.TcpListener]::new(
         [System.Net.IPAddress]::Loopback,
         0
@@ -419,7 +440,14 @@ try {
     }
 
     $results.serial_conformance = [ordered]@{}
-    foreach ($profile in @('n1mm-radio', 'n1mm-winkeyer')) {
+    $conformanceProfiles = @(
+        'hdsdr-omnirig',
+        'n1mm-radio',
+        'arcp-590',
+        'n1mm-winkeyer',
+        'wktools'
+    )
+    foreach ($profile in $conformanceProfiles) {
         $reportPath = Join-Path $workRoot "serial-conformance-$profile.json"
         $run = Invoke-Captured $ConformanceExe @(
             'run',
@@ -443,7 +471,7 @@ try {
     $results.cases += [ordered]@{
         name = 'native_serial_api_conformance'
         passed = $true
-        profiles = @('n1mm-radio', 'n1mm-winkeyer')
+        profiles = $conformanceProfiles
     }
 
     $process = Start-Process -FilePath $CatHubExe `
