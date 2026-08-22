@@ -1,0 +1,87 @@
+# CatHub-owned Windows virtual serial endpoints
+
+CatHub's UMDF transport replaces each com0com null-modem pair with one application-facing COM
+port. `cathub.exe` attaches through a separate private device interface, so the daemon does not
+consume another COM number.
+
+| Stable endpoint | Kind | Default application port | Intended client |
+|---|---|---:|---|
+| `hdsdr-cat` | CAT | COM11 | HDSDR through OmniRig |
+| `n1mm-cat` | CAT | COM21 | N1MM radio CAT |
+| `arcp590-cat` | CAT | COM31 | ARCP-590 |
+| `n1mm-winkeyer` | WinKeyer | COM41 | N1MM WinKeyer |
+| `wktools` | WinKeyer | COM43 | WKTools maintenance |
+
+The compatibility alias `cathub-default` is also available for the isolated test harness. A
+configuration selects a managed endpoint explicitly:
+
+```toml
+[[serial_endpoint]]
+name = "n1mm"
+virtual_endpoint = "n1mm-cat"
+application_transport = "COM21"
+dialect = "ts590"
+single_vfo = true
+perms = ["read", "write", "ptt"]
+```
+
+`application_transport` records and provisions the public COM name. When omitted, CatHub uses the
+endpoint's default from the table above.
+
+## Inspect and plan
+
+Status is read-only and does not require elevation:
+
+```powershell
+cathub virtual-serial status
+cathub virtual-serial status --format json
+```
+
+Plan loads the selected CatHub configuration and compares it with PnP devices and the COM Name
+Arbiter. It reports create, retain, or reassign actions and blocks any port already owned by a
+physical device, com0com, another virtual driver, or a stale arbiter reservation.
+
+```powershell
+cathub --config C:\ProgramData\CatHub\cathub.toml virtual-serial plan
+```
+
+The planner never removes or repurposes a non-CatHub device. Migrate or remove old com0com pairs
+explicitly before asking CatHub to reuse their application-side COM numbers.
+
+## Apply and remove
+
+Run device-changing operations from an elevated Administrator terminal. `apply` requires the INF
+from a complete, signed CatHub driver package; keep the INF, catalog, and UMDF DLL together.
+
+```powershell
+cathub --config C:\ProgramData\CatHub\cathub.toml virtual-serial apply `
+  --inf C:\ProgramData\CatHub\driver\cathub_virtual_serial_umdf.inf
+```
+
+Apply stages the package, creates only hardware IDs from CatHub's fixed allow-list, claims the
+requested COM numbers, installs or restarts the device, and verifies the resulting PnP state. It is
+idempotent: a second successful run reports retained endpoints and makes no changes.
+
+Remove every CatHub-owned endpoint, or select stable IDs individually:
+
+```powershell
+cathub virtual-serial remove
+cathub virtual-serial remove --endpoint n1mm-cat --endpoint n1mm-winkeyer
+```
+
+Removal checks the same compiled ownership allow-list and cannot target physical ports or com0com
+devices. It removes endpoint device instances but leaves the driver package staged so a later
+repair/apply does not depend on network access.
+
+## Development package
+
+The repository packaging command creates an ephemeral development certificate and signs the
+catalog without installing that certificate on the build workstation:
+
+```powershell
+.\scripts\Test-UmdfPoc.ps1 -Action Package
+```
+
+The resulting package is suitable only for the isolated VM procedure in
+`scripts/Test-UmdfEndToEnd.ps1`. Production distribution still requires the approved public
+catalog-signing path and clean-system Secure Boot/Memory Integrity acceptance evidence.

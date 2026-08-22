@@ -33,6 +33,7 @@ mod radio;
 mod runtime_info;
 mod serial_endpoint;
 mod state;
+mod virtual_serial_provisioning;
 mod winkeyer;
 
 #[cfg(test)]
@@ -131,6 +132,47 @@ pub enum Command {
         /// Configuration operation to perform.
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    /// Inspect or provision CatHub-owned Windows virtual COM endpoints.
+    VirtualSerial {
+        /// Virtual serial operation to perform.
+        #[command(subcommand)]
+        command: VirtualSerialCommand,
+    },
+}
+
+/// CatHub-owned Windows virtual serial operations.
+#[derive(Debug, Subcommand)]
+pub enum VirtualSerialCommand {
+    /// Report CatHub-owned PnP devices and COM claims without changing the system.
+    Status {
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Compare configured managed endpoints with PnP and COM Name Arbiter state.
+    Plan {
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Reconcile configured managed endpoints using a signed CatHub driver package.
+    Apply {
+        /// Full path to the CatHub UMDF driver INF.
+        #[arg(long, value_name = "FILE")]
+        inf: PathBuf,
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Remove CatHub-owned endpoint devices, never third-party or physical ports.
+    Remove {
+        /// Stable endpoint ID to remove; repeat to select several. Omit to remove all.
+        #[arg(long = "endpoint", value_name = "STABLE_ID")]
+        endpoints: Vec<String>,
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
     },
 }
 
@@ -683,6 +725,60 @@ fn run_command(
                 Ok(())
             }
         },
+        Command::VirtualSerial { command } => {
+            run_virtual_serial_command(command, config_path.as_deref(), section)
+        }
+    }
+}
+
+fn run_virtual_serial_command(
+    command: VirtualSerialCommand,
+    config_path: Option<&std::path::Path>,
+    section: Option<&str>,
+) -> Result<(), error::ConfigError> {
+    use virtual_serial_provisioning as provisioning;
+
+    fn print_report<T: serde::Serialize + provisioning::TextReport>(
+        report: &T,
+        format: OutputFormat,
+    ) -> Result<(), error::ConfigError> {
+        match format {
+            OutputFormat::Text => println!("{}", report.render_text()),
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::to_string_pretty(report).map_err(|error| {
+                    error::ConfigError::Invalid(format!(
+                        "serializing virtual serial report: {error}"
+                    ))
+                })?
+            ),
+        }
+        Ok(())
+    }
+
+    let load_config = || {
+        let path = config_path.map_or_else(Config::default_config_path, PathBuf::from);
+        Config::load_selected(&path, section)
+    };
+    match command {
+        VirtualSerialCommand::Status { format } => {
+            let report = provisioning::status().map_err(error::ConfigError::Invalid)?;
+            print_report(&report, format)
+        }
+        VirtualSerialCommand::Plan { format } => {
+            let report =
+                provisioning::plan(&load_config()?).map_err(error::ConfigError::Invalid)?;
+            print_report(&report, format)
+        }
+        VirtualSerialCommand::Apply { inf, format } => {
+            let report =
+                provisioning::apply(&load_config()?, &inf).map_err(error::ConfigError::Invalid)?;
+            print_report(&report, format)
+        }
+        VirtualSerialCommand::Remove { endpoints, format } => {
+            let report = provisioning::remove(&endpoints).map_err(error::ConfigError::Invalid)?;
+            print_report(&report, format)
+        }
     }
 }
 

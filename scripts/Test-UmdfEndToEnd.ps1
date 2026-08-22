@@ -5,7 +5,6 @@ param(
 
     [string]$DriverPackage = (Join-Path $PSScriptRoot 'driver'),
     [string]$CatHubExe = (Join-Path $PSScriptRoot 'cathub.exe'),
-    [string]$DevConExe = (Join-Path $PSScriptRoot 'devcon.exe'),
     [string]$ResultsPath = (Join-Path $PSScriptRoot 'cathub-umdf-e2e.json')
 )
 
@@ -77,7 +76,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $infPath = Join-Path $DriverPackage 'cathub_virtual_serial_umdf.inf'
 $certificatePath = Join-Path $DriverPackage 'cathub_umdf_test.cer'
-foreach ($path in @($infPath, $certificatePath, $CatHubExe, $DevConExe)) {
+foreach ($path in @($infPath, $certificatePath, $CatHubExe)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required test input is missing: $path"
     }
@@ -97,6 +96,7 @@ model = "TS-590SG"
 [[serial_endpoint]]
 name = "umdf-e2e"
 virtual_endpoint = "cathub-default"
+application_transport = "COM91"
 dialect = "ts590"
 perms = ["read", "frequency_write", "write", "ptt", "config_write"]
 '@ | Set-Content -LiteralPath $configPath -Encoding utf8
@@ -106,7 +106,12 @@ $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]:
 )
 Invoke-Checked certutil @('-f', '-addstore', 'Root', $certificatePath)
 Invoke-Checked certutil @('-f', '-addstore', 'TrustedPublisher', $certificatePath)
-Invoke-Checked $DevConExe @('install', $infPath, 'root\CATHUB_VIRTUAL_SERIAL')
+Invoke-Checked $CatHubExe @(
+    '--config', $configPath,
+    'virtual-serial', 'apply',
+    '--inf', $infPath,
+    '--format', 'json'
+)
 
 $portName = Find-CatHubPort
 $process = $null

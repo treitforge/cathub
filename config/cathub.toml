@@ -7,8 +7,9 @@
 # Validate without touching hardware:
 #   cargo run -p cathub -- --config config/cathub.toml --dry-run
 #
-# Virtual serial pairs (com0com): the daemon binds the first port of each pair, the
-# application binds the second. Create one pair per serial client.
+# CatHub-managed virtual serial endpoints expose one application-facing COM port each.
+# The daemon connects through the private UMDF interface selected by `virtual_endpoint`.
+# Provision them with `cathub --config config/cathub.toml virtual-serial apply --inf <INF>`.
 
 [radio]
 backend = "ts590"        # first-class native Kenwood TS-590 driver (no Hamlib linked)
@@ -30,8 +31,7 @@ native_push = true       # daemon enables and owns the TS-590 AI2; stream
 # --- WinKeyer broker ------------------------------------------------------------------
 #
 # CatHub owns the physical keyer. Typed clients use the loopback API; legacy clients use
-# the application side of a dedicated virtual serial pair. Change COM40/COM41 if that pair
-# is not installed on this station.
+# a dedicated CatHub-managed COM endpoint.
 
 [winkeyer]
 port = "COM3"
@@ -41,7 +41,7 @@ api_bind = "127.0.0.1:50071"
 
 [[winkeyer_endpoint]]
 name = "n1mm-cw"
-transport = "COM40"    # N1MM WinKeyer port is the paired COM41
+virtual_endpoint = "n1mm-winkeyer"
 application_transport = "COM41"
 baud = 1200
 primary = true
@@ -49,7 +49,7 @@ perms = ["status", "send", "control", "ptt"]
 
 [[winkeyer_endpoint]]
 name = "wktools-maintenance"
-transport = "COM42"    # WKTools maintenance port is the paired COM43
+virtual_endpoint = "wktools"
 application_transport = "COM43"
 baud = 1200
 primary = false
@@ -92,16 +92,10 @@ bind = "127.0.0.1:4534"
 single_vfo = true
 perms = ["read", "write"]
 
-# --- Serial endpoints (com0com virtual pairs) ----------------------------------------------
+# --- CatHub-managed serial endpoints ---------------------------------------------------
 #
-# IMPORTANT: each com0com pair has TWO port numbers. The daemon binds the port named below
-# (`transport`); your application must connect to the OTHER port in the same pair. Never
-# point an application at the daemon's port -- they cannot both open the same port.
-#
-#   pair                 daemon binds (transport)   application connects to
-#   COM10 <-> COM11      COM10                      COM11  (HDSDR / OmniRig)
-#   COM20 <-> COM21      COM20                      COM21  (N1MM)
-#   COM30 <-> COM31      COM30                      COM31  (ARCP-590)
+# Each application opens `application_transport`; CatHub attaches to the same device through
+# its private interface. There is no daemon-side COM port and no null-modem pair.
 
 # HDSDR via OmniRig as a TS-2000-style controller. The panadapter follows the radio, and
 # click-to-tune on the waterfall may set frequency. Mode writes are denied so OmniRig cannot
@@ -110,7 +104,7 @@ perms = ["read", "write"]
 # can never oscillate the TS-590's A/B VFO selection.
 [[serial_endpoint]]
 name = "hdsdr-omnirig"
-transport = "COM10"      # OmniRig binds COM11
+virtual_endpoint = "hdsdr-cat"
 application_transport = "COM11"
 baud = 115200
 dialect = "ts2000"
@@ -122,7 +116,7 @@ perms = ["read", "frequency_write"]
 # whichever VFO the radio is actually on, so A/B switching tracks seamlessly.
 [[serial_endpoint]]
 name = "n1mm"
-transport = "COM20"      # N1MM binds COM21
+virtual_endpoint = "n1mm-cat"
 application_transport = "COM21"
 baud = 115200
 dialect = "ts590"
@@ -134,7 +128,7 @@ perms = ["read", "write", "ptt"]
 # single_vfo off (the default).
 [[serial_endpoint]]
 name = "arcp590"
-transport = "COM30"      # ARCP-590 binds COM31
+virtual_endpoint = "arcp590-cat"
 application_transport = "COM31"
 baud = 115200
 dialect = "ts590"

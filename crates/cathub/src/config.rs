@@ -418,6 +418,35 @@ impl Config {
             ));
         }
         self.validate_winkeyer()?;
+        self.validate_managed_virtual_endpoints()?;
+        Ok(())
+    }
+
+    fn validate_managed_virtual_endpoints(&self) -> Result<(), ConfigError> {
+        let mut stable_ids = std::collections::BTreeSet::new();
+        for (kind, name, stable_id) in self
+            .serial_endpoint
+            .iter()
+            .filter_map(|endpoint| {
+                endpoint
+                    .virtual_endpoint
+                    .as_deref()
+                    .map(|stable_id| ("serial", endpoint.name.as_str(), stable_id))
+            })
+            .chain(self.winkeyer_endpoint.iter().filter_map(|endpoint| {
+                endpoint
+                    .virtual_endpoint
+                    .as_deref()
+                    .map(|stable_id| ("WinKeyer", endpoint.name.as_str(), stable_id))
+            }))
+        {
+            let normalized = stable_id.trim().to_ascii_lowercase();
+            if !stable_ids.insert(normalized) {
+                return Err(ConfigError::Invalid(format!(
+                    "managed virtual endpoint '{stable_id}' is configured more than once (including {kind} endpoint '{name}')"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -865,6 +894,31 @@ dialect = "ts590"
         assert!(error
             .to_string()
             .contains("requires exactly one of transport or virtual_endpoint"));
+    }
+
+    #[test]
+    fn rejects_duplicate_managed_identity_across_cat_and_winkeyer() {
+        let error = Config::parse(
+            r#"
+[radio]
+backend = "loopback"
+
+[[serial_endpoint]]
+name = "cat"
+virtual_endpoint = "cathub-default"
+dialect = "ts590"
+
+[winkeyer]
+port = "COM3"
+
+[[winkeyer_endpoint]]
+name = "keyer"
+virtual_endpoint = "CATHUB-DEFAULT"
+"#,
+        )
+        .expect_err("one driver endpoint cannot serve two configured sessions");
+
+        assert!(error.to_string().contains("configured more than once"));
     }
 
     const SAMPLE: &str = r#"
