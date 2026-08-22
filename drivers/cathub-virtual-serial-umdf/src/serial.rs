@@ -320,6 +320,27 @@ impl SerialState {
         Ok(())
     }
 
+    /// Compute the total timeout for a read that currently has no available bytes.
+    ///
+    /// `None` means wait indefinitely. `Some(0)` is the Windows special non-blocking
+    /// configuration (`ReadIntervalTimeout == MAXDWORD` with both totals zero).
+    #[must_use]
+    pub fn empty_read_timeout_ms(&self, requested_bytes: usize) -> Option<u64> {
+        let timeouts = self.timeouts;
+        if timeouts.read_interval_timeout == u32::MAX
+            && timeouts.read_total_timeout_multiplier == 0
+            && timeouts.read_total_timeout_constant == 0
+        {
+            return Some(0);
+        }
+        let multiplier = u64::from(timeouts.read_total_timeout_multiplier);
+        let requested = u64::try_from(requested_bytes).unwrap_or(u64::MAX);
+        let total = multiplier
+            .saturating_mul(requested)
+            .saturating_add(u64::from(timeouts.read_total_timeout_constant));
+        (total != 0).then_some(total)
+    }
+
     pub const fn set_queue_size(&self, value: SerialQueueSize) -> Result<(), SerialStateError> {
         if value.input_size > self.input_queue_limit || value.output_size > self.output_queue_limit
         {
@@ -585,6 +606,28 @@ mod tests {
             }),
             Err(SerialStateError::Timeouts)
         );
+    }
+
+    #[test]
+    fn computes_empty_read_timeout_from_windows_totals() {
+        let mut state = SerialState::default();
+        assert_eq!(state.empty_read_timeout_ms(10), None);
+        state
+            .set_timeouts(SerialTimeouts {
+                read_total_timeout_multiplier: 3,
+                read_total_timeout_constant: 70,
+                ..SerialTimeouts::default()
+            })
+            .expect("timeouts");
+        assert_eq!(state.empty_read_timeout_ms(10), Some(100));
+
+        state
+            .set_timeouts(SerialTimeouts {
+                read_interval_timeout: u32::MAX,
+                ..SerialTimeouts::default()
+            })
+            .expect("immediate timeouts");
+        assert_eq!(state.empty_read_timeout_ms(10), Some(0));
     }
 
     #[test]

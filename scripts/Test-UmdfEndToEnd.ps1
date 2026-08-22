@@ -145,6 +145,25 @@ try {
     $serial.DiscardInBuffer()
     $serial.DiscardOutBuffer()
 
+    $serial.ReadTimeout = 100
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $null = $serial.ReadByte()
+        throw 'An empty serial read unexpectedly returned data.'
+    }
+    catch [System.TimeoutException] {
+        $timer.Stop()
+    }
+    if ($timer.ElapsedMilliseconds -lt 50 -or $timer.ElapsedMilliseconds -gt 1000) {
+        throw "Empty read timed out after $($timer.ElapsedMilliseconds) ms."
+    }
+    $results.cases += [ordered]@{
+        name = 'read_timeout'
+        passed = $true
+        elapsed_ms = $timer.ElapsedMilliseconds
+    }
+    $serial.ReadTimeout = 5000
+
     $id = Invoke-CatQuery -Port $serial -Command 'ID;'
     if ($id -ne 'ID021;') {
         throw "Unexpected ID response '$id'."
