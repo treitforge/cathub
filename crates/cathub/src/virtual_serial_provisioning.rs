@@ -433,6 +433,7 @@ fn definition(stable_id: &str) -> Option<&'static EndpointDefinition> {
         .find(|endpoint| endpoint.stable_id.eq_ignore_ascii_case(stable_id))
 }
 
+#[cfg(windows)]
 fn definition_for_hardware_id(hardware_id: &str) -> Option<&'static EndpointDefinition> {
     ENDPOINTS
         .iter()

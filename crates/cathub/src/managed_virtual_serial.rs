@@ -1,14 +1,21 @@
 //! Bridge between CatHub endpoint sessions and the private UMDF transport.
 
 use std::io;
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(not(windows))]
+use tokio::io::DuplexStream;
+#[cfg(windows)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
+#[cfg(windows)]
 const BRIDGE_CAPACITY: usize = 64 * 1024;
+#[cfg(windows)]
 const MESSAGE_CAPACITY: usize = 128;
 
 /// Open and attach to one driver-managed virtual serial endpoint.
+#[cfg(windows)]
 pub(crate) async fn open(stable_id: &str, expected_kind: u16) -> io::Result<DuplexStream> {
     let stable_id = stable_id.to_owned();
     let worker = tokio::task::spawn_blocking(move || platform::connect(&stable_id, expected_kind))
@@ -17,6 +24,19 @@ pub(crate) async fn open(stable_id: &str, expected_kind: u16) -> io::Result<Dupl
     Ok(spawn_bridge(worker))
 }
 
+/// Report that managed endpoints are unavailable on non-Windows hosts.
+#[cfg(not(windows))]
+pub(crate) fn open(
+    _stable_id: &str,
+    _expected_kind: u16,
+) -> std::future::Ready<io::Result<DuplexStream>> {
+    std::future::ready(Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "managed virtual serial endpoints require Windows",
+    )))
+}
+
+#[cfg(windows)]
 fn spawn_bridge(mut worker: platform::Worker) -> DuplexStream {
     let (session, mut bridge) = tokio::io::duplex(BRIDGE_CAPACITY);
     tokio::spawn(async move {
@@ -79,43 +99,6 @@ fn spawn_bridge(mut worker: platform::Worker) -> DuplexStream {
         let _ = worker.commands.send(platform::Command::Shutdown).await;
     });
     session
-}
-
-#[cfg(not(windows))]
-mod platform {
-    use std::io;
-
-    use cathub_virtual_serial::daemon::SerialConfiguration;
-    use tokio::sync::mpsc;
-
-    pub(super) enum Command {
-        Data(Vec<u8>),
-        Release(usize),
-        Health,
-        Shutdown,
-    }
-
-    pub(super) enum Event {
-        Data(Vec<u8>),
-        ApplicationOpen(u64),
-        ApplicationClose(u64),
-        SerialConfiguration(SerialConfiguration),
-        ModemControl(u32),
-        Closed,
-        Failed(String),
-    }
-
-    pub(super) struct Worker {
-        pub(super) commands: mpsc::Sender<Command>,
-        pub(super) events: mpsc::Receiver<Event>,
-    }
-
-    pub(super) fn connect(_stable_id: &str, _expected_kind: u16) -> io::Result<Worker> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "managed virtual serial endpoints require Windows",
-        ))
-    }
 }
 
 #[cfg(windows)]
