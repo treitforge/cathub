@@ -88,6 +88,9 @@ pub(crate) struct InstalledEndpoint {
     display_name: String,
     com_port: Option<String>,
     authorized_for_current_user: bool,
+    started: bool,
+    problem_code: u32,
+    devnode_status: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -189,6 +192,12 @@ impl TextReport for StatusReport {
             ));
             if !endpoint.authorized_for_current_user {
                 lines.push("    Private daemon access requires owner reconciliation.".to_string());
+            }
+            if !endpoint.started {
+                lines.push(format!(
+                    "    PnP device is not started (problem code {}, status 0x{:08x}).",
+                    endpoint.problem_code, endpoint.devnode_status
+                ));
             }
         }
         if self.owned_endpoints.is_empty() {
@@ -305,6 +314,21 @@ pub(crate) fn apply(config: &Config, inf_path: &Path) -> Result<ApplyReport, Str
     let changed = plan.requires_changes();
     let reboot_required = platform::apply(&plan, &inf_path)?;
     let after = platform::snapshot()?;
+    let desired_ids = plan
+        .desired
+        .iter()
+        .map(|endpoint| endpoint.stable_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(endpoint) = after
+        .owned
+        .iter()
+        .find(|endpoint| desired_ids.contains(endpoint.stable_id.as_str()) && !endpoint.started)
+    {
+        return Err(format!(
+            "CatHub endpoint `{}` was provisioned but its PnP device did not start (problem code {}, status 0x{:08x})",
+            endpoint.stable_id, endpoint.problem_code, endpoint.devnode_status
+        ));
+    }
     let verification = plan_from_snapshot(plan.desired.clone(), &after)?;
     if !verification.is_applicable() || verification.requires_changes() {
         return Err("provisioning completed but the resulting PnP/COM state does not match the requested plan".to_string());
@@ -571,14 +595,15 @@ mod platform {
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        DiInstallDriverW, SetupDiCallClassInstaller, SetupDiCreateDeviceInfoList,
-        SetupDiCreateDeviceInfoW, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
-        SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW,
-        SetupDiOpenDevRegKey, SetupDiOpenDeviceInfoW, SetupDiRemoveDevice, SetupDiRestartDevices,
-        SetupDiSetDeviceRegistryPropertyW, UpdateDriverForPlugAndPlayDevicesW, DICD_GENERATE_ID,
-        DICS_FLAG_GLOBAL, DIF_REGISTERDEVICE, DIGCF_ALLCLASSES, DIIRFLAG_FORCE_INF, DIREG_DEV,
-        GUID_DEVCLASS_PORTS, HDEVINFO, INSTALLFLAG_FORCE, SPDRP_DEVICEDESC, SPDRP_FRIENDLYNAME,
-        SPDRP_HARDWAREID, SP_DEVINFO_DATA,
+        CM_Get_DevNode_Status, DiInstallDriverW, SetupDiCallClassInstaller,
+        SetupDiCreateDevRegKeyW, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+        SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW, SetupDiOpenDevRegKey,
+        SetupDiOpenDeviceInfoW, SetupDiRemoveDevice, SetupDiRestartDevices,
+        SetupDiSetDeviceRegistryPropertyW, UpdateDriverForPlugAndPlayDevicesW, CR_SUCCESS,
+        DICD_GENERATE_ID, DICS_FLAG_GLOBAL, DIF_REGISTERDEVICE, DIGCF_ALLCLASSES,
+        DIIRFLAG_FORCE_INF, DIREG_DEV, DN_STARTED, GUID_DEVCLASS_PORTS, HDEVINFO,
+        INSTALLFLAG_FORCE, SPDRP_DEVICEDESC, SPDRP_FRIENDLYNAME, SPDRP_HARDWAREID, SP_DEVINFO_DATA,
     };
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS,
@@ -738,6 +763,7 @@ mod platform {
                 });
             }
             if let Some(definition) = definition {
+                let (devnode_status, problem_code) = device_status(&data)?;
                 let owner_sid = device_binary_value(set.0, &data, OWNER_SID_VALUE);
                 let display_name = device_property_strings(set.0, &data, SPDRP_FRIENDLYNAME)
                     .into_iter()
@@ -757,6 +783,9 @@ mod platform {
                     com_port: port,
                     authorized_for_current_user: owner_sid.as_deref()
                         == Some(current_sid.as_slice()),
+                    started: devnode_status & DN_STARTED != 0 && problem_code == 0,
+                    problem_code,
+                    devnode_status,
                 });
             }
         }
@@ -772,6 +801,21 @@ mod platform {
         owned.sort_by(|left, right| left.stable_id.cmp(&right.stable_id));
         claims.sort_by_key(|claim| com_number(&claim.com_port));
         Ok(SystemSnapshot { owned, claims })
+    }
+
+    fn device_status(data: &SP_DEVINFO_DATA) -> Result<(u32, u32), String> {
+        let mut status = 0;
+        let mut problem = 0;
+        // SAFETY: `DevInst` identifies the enumerated live devnode and both outputs are valid.
+        let result =
+            unsafe { CM_Get_DevNode_Status(&raw mut status, &raw mut problem, data.DevInst, 0) };
+        if result != CR_SUCCESS {
+            return Err(format!(
+                "reading PnP status for devnode {} failed with CONFIGRET {result}",
+                data.DevInst
+            ));
+        }
+        Ok((status, problem))
     }
 
     pub(super) fn apply(plan: &ProvisionPlan, inf_path: &Path) -> Result<bool, String> {
@@ -933,6 +977,7 @@ mod platform {
             )));
         }
         let result = (|| {
+            create_device_registry_key(set.0, &data, com_port)?;
             set_port_name(set.0, &data, com_port)?;
             set_owner_sid(set.0, &data, owner_sid)?;
             let hardware_id = wide(hardware_id);
@@ -959,6 +1004,28 @@ mod platform {
             unsafe { SetupDiRemoveDevice(set.0, &raw mut data) };
         }
         result
+    }
+
+    fn create_device_registry_key(
+        set: HDEVINFO,
+        data: &SP_DEVINFO_DATA,
+        com_port: &str,
+    ) -> Result<(), String> {
+        // Newly registered root devices do not necessarily have a hardware key yet. Create it
+        // before storing PortName and CatHubOwnerSid; existing-device reconciliation only opens
+        // the key and therefore cannot accidentally create registry state for foreign devices.
+        // SAFETY: The device data belongs to the live set. Null INF inputs request an empty key.
+        let key = unsafe {
+            SetupDiCreateDevRegKeyW(set, data, DICS_FLAG_GLOBAL, 0, DIREG_DEV, null(), null())
+        };
+        if key as isize == INVALID_HANDLE_VALUE as isize {
+            return Err(last_error(&format!(
+                "creating the device registry key for {com_port}"
+            )));
+        }
+        // SAFETY: This function owns the registry handle returned above.
+        unsafe { RegCloseKey(key) };
+        Ok(())
     }
 
     fn set_existing_port(
@@ -1533,6 +1600,9 @@ dialect = "ts590"
                 display_name: "CatHub N1MM CAT Port".to_string(),
                 com_port: Some("COM21".to_string()),
                 authorized_for_current_user: true,
+                started: true,
+                problem_code: 0,
+                devnode_status: 0x08,
             }],
             claims: vec![PortClaim {
                 com_port: "COM21".to_string(),
@@ -1567,6 +1637,9 @@ dialect = "ts590"
                 display_name: "CatHub N1MM CAT Port".to_string(),
                 com_port: Some("COM21".to_string()),
                 authorized_for_current_user: false,
+                started: true,
+                problem_code: 0,
+                devnode_status: 0x08,
             }],
             claims: vec![PortClaim {
                 com_port: "COM21".to_string(),

@@ -17,12 +17,12 @@ use wdk::println;
 use wdk_sys::{
     _SECURITY_IMPERSONATION_LEVEL, _WDF_EXECUTION_LEVEL, _WDF_FILEOBJECT_CLASS,
     _WDF_IO_QUEUE_DISPATCH_TYPE, _WDF_SYNCHRONIZATION_SCOPE, _WDF_TRI_STATE, BOOLEAN, GUID,
-    KEY_QUERY_VALUE, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, PLUGPLAY_REGKEY_DEVICE, PVOID,
-    ULONG, ULONG_PTR, UNICODE_STRING, WDF_DRIVER_CONFIG, WDF_FILEOBJECT_CONFIG,
-    WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, WDF_OBJECT_ATTRIBUTES,
-    WDF_OBJECT_CONTEXT_TYPE_INFO, WDF_TIMER_CONFIG, WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER,
-    WDFFILEOBJECT, WDFKEY, WDFOBJECT, WDFQUEUE, WDFQUEUE__, WDFREQUEST, WDFTIMER,
-    call_unsafe_wdf_function_binding,
+    KEY_QUERY_VALUE, KEY_SET_VALUE, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT,
+    PLUGPLAY_REGKEY_DEVICE, PVOID, ULONG, ULONG_PTR, UNICODE_STRING, WDF_DRIVER_CONFIG,
+    WDF_FILEOBJECT_CONFIG, WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
+    WDF_OBJECT_ATTRIBUTES, WDF_OBJECT_CONTEXT_TYPE_INFO, WDF_TIMER_CONFIG, WDFDEVICE,
+    WDFDEVICE_INIT, WDFDRIVER, WDFFILEOBJECT, WDFKEY, WDFOBJECT, WDFQUEUE, WDFQUEUE__, WDFREQUEST,
+    WDFTIMER, call_unsafe_wdf_function_binding,
 };
 use windows_sys::Win32::Security::{CheckTokenMembership, GetLengthSid, IsValidSid};
 
@@ -60,6 +60,12 @@ const DISPLAY_NAME_VALUE: [u16; 18] = [
 ];
 const OWNER_SID_VALUE: [u16; 15] = [
     67, 97, 116, 72, 117, 98, 79, 119, 110, 101, 114, 83, 105, 100, 0,
+];
+const STARTUP_STAGE_VALUE: [u16; 19] = [
+    67, 97, 116, 72, 117, 98, 83, 116, 97, 114, 116, 117, 112, 83, 116, 97, 103, 101, 0,
+];
+const STARTUP_STATUS_VALUE: [u16; 20] = [
+    67, 97, 116, 72, 117, 98, 83, 116, 97, 114, 116, 117, 112, 83, 116, 97, 116, 117, 115, 0,
 ];
 const DOS_DEVICE_PREFIX: &[u16] = &[
     92, 68, 111, 115, 68, 101, 118, 105, 99, 101, 115, 92, 71, 108, 111, 98, 97, 108, 92,
@@ -333,8 +339,12 @@ unsafe fn create_device(mut device_init: *mut WDFDEVICE_INIT) -> NTSTATUS {
     if !nt_success(status) {
         return status;
     }
+    // SAFETY: Device creation succeeded, so its hardware key can record startup diagnostics.
+    unsafe { record_startup_diagnostic(device, 1, STATUS_SUCCESS) };
     // SAFETY: Device creation allocated and zeroed the registered context space.
     let Some(context) = (unsafe { device_context(device) }) else {
+        // SAFETY: The device remains live until this callback returns the failure.
+        unsafe { record_startup_diagnostic(device, 2, STATUS_UNSUCCESSFUL) };
         return STATUS_UNSUCCESSFUL;
     };
     // SAFETY: The live WDF device owns a queryable PnP instance registry key.
@@ -349,16 +359,58 @@ unsafe fn create_device(mut device_init: *mut WDFDEVICE_INIT) -> NTSTATUS {
     let state = unsafe { &*state };
     // SAFETY: The WDF device was successfully created above.
     let status = unsafe { configure_queues(device, state) };
+    // SAFETY: The WDF device is still live even when queue configuration fails.
+    unsafe { record_startup_diagnostic(device, 3, status) };
     if !nt_success(status) {
         return status;
     }
     // SAFETY: The device is live and owns the periodic timer for its full lifetime.
     let status = unsafe { configure_read_timeout_timer(device) };
+    // SAFETY: The WDF device is still live even when timer configuration fails.
+    unsafe { record_startup_diagnostic(device, 4, status) };
     if !nt_success(status) {
         return status;
     }
     // SAFETY: The device exists and registration consumes both counted strings synchronously.
-    unsafe { register_interfaces(device) }
+    let status = unsafe { register_interfaces(device) };
+    // SAFETY: The WDF device is live through the end of this callback.
+    unsafe { record_startup_diagnostic(device, 5, status) };
+    status
+}
+
+unsafe fn record_startup_diagnostic(device: WDFDEVICE, stage: u32, status: NTSTATUS) {
+    let mut key: WDFKEY = ptr::null_mut();
+    // SAFETY: The device is live and output storage is valid. Diagnostics are best effort.
+    let open_status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceOpenRegistryKey,
+            device,
+            PLUGPLAY_REGKEY_DEVICE,
+            KEY_SET_VALUE,
+            WDF_NO_OBJECT_ATTRIBUTES,
+            &raw mut key,
+        )
+    };
+    if !nt_success(open_status) {
+        return;
+    }
+    let stage_name = unicode_string(&STARTUP_STAGE_VALUE);
+    let status_name = unicode_string(&STARTUP_STATUS_VALUE);
+    // SAFETY: The registry key and stage value name remain valid for this synchronous write.
+    let _ = unsafe {
+        call_unsafe_wdf_function_binding!(WdfRegistryAssignULong, key, &raw const stage_name, stage,)
+    };
+    // SAFETY: The registry key and status value name remain valid for this synchronous write.
+    let _ = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRegistryAssignULong,
+            key,
+            &raw const status_name,
+            status.cast_unsigned(),
+        )
+    };
+    // SAFETY: This function owns the WDF registry handle returned above.
+    unsafe { call_unsafe_wdf_function_binding!(WdfRegistryClose, key) };
 }
 
 unsafe fn configure_read_timeout_timer(device: WDFDEVICE) -> NTSTATUS {

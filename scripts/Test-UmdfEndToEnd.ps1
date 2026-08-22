@@ -8,6 +8,10 @@ param(
     [string]$ConformanceExe = (Join-Path $PSScriptRoot 'serial-conformance.exe'),
     [string]$ResultsPath = (Join-Path $PSScriptRoot 'cathub-umdf-e2e.json'),
 
+    [switch]$AllowLocalMachine,
+
+    [switch]$AllowSecureBootDisabled,
+
     [switch]$KeepInstalled
 )
 
@@ -186,29 +190,23 @@ function Get-EventEvidence {
 }
 
 function Find-CatHubDevice {
+    param(
+        [Parameter(Mandatory)][string]$Executable,
+        [Parameter(Mandatory)][string]$StableId
+    )
+
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
-        $device = Get-PnpDevice -Class Ports -PresentOnly -ErrorAction SilentlyContinue |
-            Where-Object InstanceId -Like 'ROOT\CATHUB_VIRTUAL_SERIAL*' |
-            Select-Object -First 1
-        if ($device) {
-            $match = [regex]::Match($device.FriendlyName, '\((COM\d+)\)')
-            if ($match.Success) {
+        $statusJson = (& $Executable virtual-serial status --format json 2>$null | Out-String)
+        if ($LASTEXITCODE -eq 0) {
+            $status = $statusJson | ConvertFrom-Json
+            $endpoint = $status.owned_endpoints |
+                Where-Object stable_id -EQ $StableId |
+                Select-Object -First 1
+            if ($endpoint -and $endpoint.com_port -match '^COM\d+$') {
                 return [pscustomobject]@{
-                    InstanceId = $device.InstanceId
-                    Port = $match.Groups[1].Value
-                }
-            }
-
-            $enumPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($device.InstanceId)"
-            foreach ($path in @($enumPath, (Join-Path $enumPath 'Device Parameters'))) {
-                $portName = (Get-ItemProperty -LiteralPath $path -Name PortName `
-                        -ErrorAction SilentlyContinue).PortName
-                if ($portName -match '^COM\d+$') {
-                    return [pscustomobject]@{
-                        InstanceId = $device.InstanceId
-                        Port = $portName
-                    }
+                    InstanceId = $endpoint.instance_id
+                    Port = $endpoint.com_port
                 }
             }
         }
@@ -229,12 +227,19 @@ function Invoke-CatQuery {
 }
 
 if (-not $IUnderstandThisInstallsATestDriver) {
-    throw 'Pass -IUnderstandThisInstallsATestDriver on an isolated test VM.'
+    throw 'Pass -IUnderstandThisInstallsATestDriver to acknowledge the test driver installation.'
 }
 
 $computer = Get-CimInstance Win32_ComputerSystem
-if ($computer.Manufacturer -ne 'Microsoft Corporation' -or $computer.Model -ne 'Virtual Machine') {
-    throw 'This test installs a private test certificate and driver and is restricted to a Hyper-V VM.'
+$isHyperVGuest = (
+    $computer.Manufacturer -eq 'Microsoft Corporation' -and
+    $computer.Model -eq 'Virtual Machine'
+)
+if (-not $isHyperVGuest -and -not $AllowLocalMachine) {
+    throw 'This test installs a private test certificate and driver. Use a Hyper-V VM or explicitly pass -AllowLocalMachine.'
+}
+if ($AllowSecureBootDisabled -and -not $AllowLocalMachine) {
+    throw '-AllowSecureBootDisabled is restricted to an explicitly authorized local-machine development run.'
 }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -299,6 +304,13 @@ $failure = $null
 $results = [ordered]@{
     timestamp_utc = $testStart.ToString('o')
     machine = $env:COMPUTERNAME
+    target = [ordered]@{
+        manufacturer = $computer.Manufacturer
+        model = $computer.Model
+        hyper_v_guest = $isHyperVGuest
+        local_machine_opt_in = [bool]$AllowLocalMachine
+        secure_boot_exception_used = [bool]$AllowSecureBootDisabled
+    }
     os = [ordered]@{
         caption = $operatingSystem.Caption
         version = $operatingSystem.Version
@@ -327,8 +339,11 @@ try {
     if (-not $results.package_integrity.passed) {
         throw 'One or more staged driver files do not match package-manifest.json.'
     }
-    if ($results.security.secure_boot_enabled -ne $true) {
-        throw 'Secure Boot is not enabled in the isolated Windows test target.'
+    if (
+        $results.security.secure_boot_enabled -ne $true -and
+        -not $AllowSecureBootDisabled
+    ) {
+        throw 'Secure Boot is not enabled on the Windows test target.'
     }
     if ($results.security.testsigning_enabled) {
         throw 'Windows test-signing mode is enabled; the acceptance target must use normal policy.'
@@ -374,7 +389,7 @@ try {
         throw "CatHub virtual-serial apply failed: $($results.apply.output)"
     }
 
-    $device = Find-CatHubDevice
+    $device = Find-CatHubDevice -Executable $CatHubExe -StableId 'cathub-default'
     $portName = $device.Port
     $results.port = $portName
     $results.device_instance_id = $device.InstanceId
@@ -603,7 +618,7 @@ try {
     $serial.Dispose()
     $serial = $null
 
-    $restartedDevice = Find-CatHubDevice
+    $restartedDevice = Find-CatHubDevice -Executable $CatHubExe -StableId 'cathub-default'
     if ($restartedDevice.InstanceId -ne $device.InstanceId) {
         throw "Device restart changed instance ID to '$($restartedDevice.InstanceId)'."
     }
