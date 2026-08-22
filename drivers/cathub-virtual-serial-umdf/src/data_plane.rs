@@ -1,16 +1,16 @@
-//! Safe, bounded byte transport between the two proof-of-concept handles.
+//! Safe, bounded byte transport between the application COM and daemon handles.
 
 use std::collections::VecDeque;
 
 /// Maximum bytes retained in each direction.
 pub const DEFAULT_BUFFER_CAPACITY: usize = 64 * 1024;
 
-/// Side of the proof-of-concept device channel.
+/// Side of one managed endpoint's device channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelRole {
-    /// Handle that stands in for the future application COM port.
+    /// Public application COM handle.
     Application,
-    /// Private handle owned by the CatHub-side test process.
+    /// Private handle owned by the `CatHub` daemon.
     Daemon,
 }
 
@@ -43,7 +43,7 @@ pub enum DataPlaneError {
     },
 }
 
-/// One endpoint's in-memory proof-of-concept transport state.
+/// One endpoint's in-memory transport state.
 #[derive(Debug)]
 pub struct EndpointDataPlane {
     application_open: bool,

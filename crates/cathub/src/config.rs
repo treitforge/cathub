@@ -138,13 +138,13 @@ impl Default for EventsConfig {
 pub(crate) struct SerialEndpointConfig {
     /// A label for logging.
     pub(crate) name: String,
-    /// The serial port this endpoint listens on (a com0com / tty path).
+    /// An externally provisioned serial port this endpoint listens on.
     #[serde(default)]
     pub(crate) transport: String,
     /// Stable endpoint identifier exposed by the CatHub UMDF driver.
     #[serde(default)]
     pub(crate) virtual_endpoint: Option<String>,
-    /// The paired endpoint opened by the client application. The hub never opens it.
+    /// The application-facing COM port, recorded for provisioning and migration guidance.
     #[serde(default)]
     pub(crate) application_transport: Option<String>,
     /// Baud rate for the endpoint port.
@@ -227,13 +227,13 @@ pub(crate) struct WinkeyerConfig {
 pub(crate) struct WinkeyerEndpointConfig {
     /// Stable endpoint name used in logs and ownership status.
     pub(crate) name: String,
-    /// Hub side of the virtual serial pair.
+    /// An externally provisioned serial port used by the hub side.
     #[serde(default)]
     pub(crate) transport: String,
     /// Stable endpoint identifier exposed by the CatHub UMDF driver.
     #[serde(default)]
     pub(crate) virtual_endpoint: Option<String>,
-    /// Paired endpoint opened by the client application. The hub never opens it.
+    /// The application-facing COM port, recorded for provisioning and migration guidance.
     #[serde(default)]
     pub(crate) application_transport: Option<String>,
     /// Virtual endpoint baud rate.

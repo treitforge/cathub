@@ -78,6 +78,8 @@ test certificate off normal operator machines.
 All Windows and WDF calls live in `src/interop.rs`.
 Every exported or registered callback catches Rust panics before they can unwind into WDF.
 The driver contains no kernel-mode CatHub code and no C or C++ shim.
+Each device stack opts out of UMDF device pooling so a CatHub endpoint runs in its own
+`WUDFHost.exe` process instead of sharing an address space with unrelated UMDF drivers.
 
 The data plane currently provides:
 

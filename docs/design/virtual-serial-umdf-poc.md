@@ -2,17 +2,15 @@
 
 ## Scope and status
 
-This is the isolated proof-of-concept branch for issue #6.
-Phase 1 defined the private framing contract and conformance harness.
-This milestone pins the pure Rust UMDF 2 binary and adds its first private byte-transfer channel
-before any device is installed.
+This branch began as the isolated proof of concept for issue #6 and now contains the integrated
+development candidate. Phase 1 defined the private framing contract and conformance harness; the
+subsequent work added the pure Rust UMDF data plane, CatHub adapter, Ports-class provisioning, and
+development packaging.
 
-The scaffold is not a virtual COM driver yet.
-Its INF uses a private CatHub proof-of-concept class. The driver registers `application` and
-`daemon` reference names under private interface
-`{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}` and transfers raw bytes between them.
-Keeping the device non-serial prevents an incomplete driver from appearing usable to N1MM or
-another station application.
+The driver now registers one application-facing `GUID_DEVINTERFACE_COMPORT` interface and one
+reference-named `daemon` instance of the private CatHub interface
+`{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`. The application sees one Windows-assigned COM port while
+`cathub.exe` transfers framed data and control events through the private interface.
 
 ## Reproducible inputs
 
@@ -33,7 +31,7 @@ WDK configuration in a Cargo build graph.
 
 ## Local environment audit
 
-Audit date: 2026-08-15.
+Audit date: 2026-08-22.
 
 Available on the development station:
 
@@ -43,12 +41,18 @@ Available on the development station:
 - Windows SDK directories through 10.0.26100.0
 - User-local Microsoft WDK NuGet package 10.0.28000.2526 and SDK dependency 10.0.28000.1721
 - `cargo-make` 0.37.24 and `rust-script` 0.36.0
-- N1MM Logger+ and isolated com0com pairs including COM20/COM21
+- N1MM Logger+ and the existing com0com pairs, which remain untouched for comparison
 
 The WDK package supplies the WDF headers and WDK validation/packaging tools without a machine-wide
 installation or administrator access. The driver compiles against that package, `Inf2Cat` reports
-zero signability errors or warnings, and `InfVerif` accepts the generated INF. No driver or
-certificate was installed during this audit; the validated package is unsigned.
+zero signability errors or warnings, and `InfVerif` accepts the generated INF. The package embeds
+a short-lived development signature in the DLL before regenerating and signing the catalog.
+
+With explicit operator authorization, the development package was provisioned locally as COM91
+without changing or removing any com0com device. Windows staged the package and verified both
+signatures, but normal boot policy rejected the self-signed image with
+`ERROR_INVALID_IMAGE_HASH`. Installed functional validation therefore awaits an explicitly
+authorized Test Signing reboot or a publicly/Microsoft-signed package.
 
 ## Microsoft sample inventory
 
@@ -60,12 +64,12 @@ The source remains upstream; CatHub does not copy the C implementation.
 
 | Area | VirtualSerial2 behavior | CatHub PoC state |
 |---|---|---|
-| Driver | `DriverEntry`, `EVT_WDF_DRIVER_DEVICE_ADD` | Entry and device-add skeleton |
+| Driver | `DriverEntry`, `EVT_WDF_DRIVER_DEVICE_ADD` | Pure Rust entry and device creation implemented |
 | Device | Device context and cleanup callback | Typed per-device context and destroy cleanup implemented |
-| Default queue | Parallel read, write, and device-control callbacks | Sequential proof-of-concept read/write queue implemented |
+| Default queue | Parallel read, write, and device-control callbacks | Sequential read, write, and serial-control queue implemented |
 | Pending reads | Manual queue | Two manual queues with cancellation and disconnect draining implemented |
-| Pending event wait | Separate manual queue | Planned, one outstanding wait policy required |
-| Cleanup | Device cleanup releases COM mapping | Planned with daemon detach and fail-safe revocation |
+| Pending event wait | Separate manual queue | One-outstanding-wait manual queue implemented |
+| Cleanup | Device cleanup releases COM mapping | Application/daemon detach drains requests and clears bounded buffers |
 
 ### Serial controls implemented by the sample
 
@@ -119,15 +123,14 @@ byte buffers, exclusive-handle state, application session sequence, and pending-
 Each device owns those values through typed WDF context; file and queue callbacks resolve their
 parent device before accessing the state.
 
-## Gates before the INF becomes a Ports-class package
+## Remaining installed-validation gates
 
-1. Restore the pinned WDK package in the isolated development environment.
-2. Build and package this proof-of-concept-class driver with warnings treated as errors.
-3. Keep endpoint state and queue handles in typed per-device context, resolving it from file and
-   queue callbacks.
-4. Extend the implemented bounded read/write, cancellation, and cleanup behavior with serial
-   timeout state.
-5. Register `GUID_DEVINTERFACE_COMPORT` and a private CatHub interface.
-6. Add the COM mapping only after restart and removal are deterministic.
-7. Install only on the isolated test target with development-signing policy documented.
-8. Run the `n1mm-radio` sequence in `docs/testing/n1mm-radio-poc.md`.
+1. Load the self-signed development image under explicitly authorized Windows Test Signing policy,
+   or obtain a public/Microsoft signature suitable for normal policy.
+2. Confirm the device starts, both interfaces enumerate, and the stable COM mapping survives a
+   clean device restart.
+3. Run every native serial conformance profile through the private CatHub adapter.
+4. Run the `n1mm-radio` sequence in `docs/testing/n1mm-radio-poc.md` and repeat the applicable
+   flows for the other four legacy clients.
+5. Exercise daemon failure, UMDF-host restart, repair, upgrade, rollback, removal, sleep, and resume
+   while preserving fail-safe transmit behavior.

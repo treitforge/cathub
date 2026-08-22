@@ -71,7 +71,7 @@ const DOS_DEVICE_PREFIX: &[u16] = &[
     92, 68, 111, 115, 68, 101, 118, 105, 99, 101, 115, 92, 71, 108, 111, 98, 97, 108, 92,
 ];
 
-/// Private proof-of-concept interface, `{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`.
+/// Private `CatHub` daemon interface, `{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`.
 static CATHUB_POC_INTERFACE_GUID: GUID = GUID {
     Data1: 0x0084_BDDE,
     Data2: 0x9F40,
@@ -266,7 +266,7 @@ pub unsafe extern "system" fn driver_entry(
 }
 
 unsafe fn driver_entry_inner(driver: PDRIVER_OBJECT, registry_path: PCUNICODE_STRING) -> NTSTATUS {
-    println!("CatHub UMDF proof-of-concept DriverEntry");
+    println!("CatHub virtual serial UMDF DriverEntry");
     // SAFETY: DriverEntry runs before WDF can create device objects or invoke callbacks.
     unsafe { initialize_device_context_type() };
     let mut driver_config = WDF_DRIVER_CONFIG {
@@ -758,7 +758,7 @@ unsafe extern "C" fn evt_device_file_create(
                     state.channel().close_if_owner(role, file);
                     return RequestDisposition::error(status_for_error(error));
                 }
-                println!("CatHub PoC {role:?} handle opened (session {session})");
+                println!("CatHub {role:?} handle opened (session {session})");
                 RequestDisposition::success(0)
             }
             Err(error) => RequestDisposition::error(status_for_error(error)),
@@ -836,7 +836,7 @@ unsafe extern "C" fn evt_file_cleanup(file: WDFFILEOBJECT) {
             }
         };
         if state.channel().close_if_owner(role, file) {
-            println!("CatHub PoC {role:?} handle cleaned up");
+            println!("CatHub {role:?} handle cleaned up");
             state.pending_application_reads().clear();
             // SAFETY: Cleanup runs while the device and its child queues are alive.
             let _ = unsafe { apply_protocol_outputs(state, outputs) };
@@ -1825,7 +1825,7 @@ fn unicode_string_buffer(buffer: &mut [u16]) -> UNICODE_STRING {
 }
 
 unsafe extern "C" fn evt_driver_unload(_driver: WDFDRIVER) {
-    ffi_void(|| println!("CatHub UMDF proof-of-concept unloaded"));
+    ffi_void(|| println!("CatHub virtual serial UMDF unloaded"));
 }
 
 fn ffi_status(action: impl FnOnce() -> NTSTATUS) -> NTSTATUS {

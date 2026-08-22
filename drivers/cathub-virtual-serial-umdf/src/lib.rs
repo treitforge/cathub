@@ -1,11 +1,12 @@
 // Copyright (c) CatHub contributors.
 // SPDX-License-Identifier: MIT
 
-//! Pure Rust UMDF 2 proof of concept for `CatHub` virtual serial endpoints.
+//! Pure Rust UMDF 2 driver for `CatHub`-managed virtual serial endpoints.
 //!
-//! The current milestone creates a private, reference-named application/daemon
-//! interface with bounded bidirectional queues. It deliberately does not yet
-//! register a public COM port.
+//! Each device exposes one public Windows COM port and one ACL-restricted,
+//! reference-named private interface used by the `CatHub` daemon. The driver
+//! owns bounded bidirectional queues and implements the Windows serial control
+//! surface exercised by the native conformance harness.
 
 #[cfg_attr(test, allow(dead_code))]
 mod data_plane;
