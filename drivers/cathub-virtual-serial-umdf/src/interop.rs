@@ -23,6 +23,7 @@ use wdk_sys::{
 };
 
 use crate::data_plane::{ChannelRole, DEFAULT_BUFFER_CAPACITY, DataPlaneError, EndpointDataPlane};
+use crate::private_protocol::{DriverProtocol, DriverProtocolError, ProtocolOutput};
 use crate::serial::{
     SerialBaudRate, SerialChars, SerialCommProperties, SerialHandflow, SerialLineControl,
     SerialQueueSize, SerialState, SerialStateError, SerialStatus, SerialTimeouts, ioctl, purge,
@@ -68,6 +69,7 @@ struct DeviceContext {
 
 struct DeviceState {
     channel: Mutex<ChannelState>,
+    protocol: Mutex<DriverProtocol>,
     serial: Mutex<SerialState>,
     application_reads: AtomicPtr<WDFQUEUE__>,
     daemon_reads: AtomicPtr<WDFQUEUE__>,
@@ -80,6 +82,7 @@ impl DeviceState {
         serial.set_modem_input(serial.modem_input());
         Self {
             channel: Mutex::new(ChannelState::new()),
+            protocol: Mutex::new(DriverProtocol::new()),
             serial: Mutex::new(serial),
             application_reads: AtomicPtr::new(ptr::null_mut()),
             daemon_reads: AtomicPtr::new(ptr::null_mut()),
@@ -102,6 +105,12 @@ impl DeviceState {
 
     fn serial(&self) -> MutexGuard<'_, SerialState> {
         self.serial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn protocol(&self) -> MutexGuard<'_, DriverProtocol> {
+        self.protocol
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -475,6 +484,25 @@ unsafe extern "C" fn evt_device_file_create(
         let open_result = state.channel().open(role, file);
         match open_result {
             Ok(session) => {
+                let outputs = match role {
+                    ChannelRole::Application => state.protocol().application_opened(session),
+                    ChannelRole::Daemon => {
+                        state.protocol().reset_daemon();
+                        Ok(Vec::new())
+                    }
+                };
+                let outputs = match outputs {
+                    Ok(outputs) => outputs,
+                    Err(error) => {
+                        state.channel().close_if_owner(role, file);
+                        return RequestDisposition::error(status_for_protocol_error(error));
+                    }
+                };
+                // SAFETY: This callback owns the create request and all device queues are live.
+                if let Err(error) = unsafe { apply_protocol_outputs(state, outputs) } {
+                    state.channel().close_if_owner(role, file);
+                    return RequestDisposition::error(status_for_error(error));
+                }
                 println!("CatHub PoC {role:?} handle opened (session {session})");
                 RequestDisposition::success(0)
             }
@@ -496,8 +524,20 @@ unsafe extern "C" fn evt_file_cleanup(file: WDFFILEOBJECT) {
         let Some(role) = (unsafe { role_from_file(file) }) else {
             return;
         };
+        if !state.channel().owns(role, file) {
+            return;
+        }
+        let outputs = match role {
+            ChannelRole::Application => state.protocol().application_closed().unwrap_or_default(),
+            ChannelRole::Daemon => {
+                state.protocol().reset_daemon();
+                Vec::new()
+            }
+        };
         if state.channel().close_if_owner(role, file) {
             println!("CatHub PoC {role:?} handle cleaned up");
+            // SAFETY: Cleanup runs while the device and its child queues are alive.
+            let _ = unsafe { apply_protocol_outputs(state, outputs) };
             // SAFETY: This handle refers to a manual queue owned by this device.
             unsafe {
                 drain_pending_reads(state.queue_for(ChannelRole::Application), STATUS_CANCELLED);
@@ -578,7 +618,10 @@ unsafe fn handle_read(
     if length == 0 {
         return RequestDisposition::success(0);
     }
-    let available = state.channel().plane.available_to_read(role);
+    let available = match role {
+        ChannelRole::Application => state.channel().plane.available_to_read(role),
+        ChannelRole::Daemon => state.channel().plane.available_for_daemon(),
+    };
     match available {
         Ok(0) => {
             let queue = state.queue_for(role);
@@ -634,20 +677,26 @@ unsafe fn handle_write(
     let usable = length.min(buffer_length);
     // SAFETY: WDF returned at least `buffer_length` readable bytes.
     let input = unsafe { slice::from_raw_parts(buffer.cast_const().cast::<u8>(), usable) };
-    let write_result = state.channel().plane.write(role, input);
-    match write_result {
-        Ok(written) => {
+    let outputs = match role {
+        ChannelRole::Application => state
+            .protocol()
+            .application_data(input)
+            .map(|output| vec![output]),
+        ChannelRole::Daemon => state.protocol().ingest_daemon(input),
+    };
+    let outputs = match outputs {
+        Ok(outputs) => outputs,
+        Err(error) => return RequestDisposition::error(status_for_protocol_error(error)),
+    };
+    // SAFETY: The invoking callback owns the request and device child queues are live.
+    match unsafe { apply_protocol_outputs(state, outputs) } {
+        Ok(()) => {
             if role == ChannelRole::Application {
                 state.serial().signal_transmit_empty();
-            } else {
-                let queued = state.channel().plane.incoming_len(ChannelRole::Application);
-                state.serial().signal_receive(input, queued);
+                // SAFETY: The wait-request queue belongs to this device.
+                unsafe { service_wait_request(state) };
             }
-            // SAFETY: The wait-request queue belongs to this device.
-            unsafe { service_wait_request(state) };
-            // SAFETY: The peer's pending queue belongs to this device.
-            unsafe { service_pending_reads(state, role.peer()) };
-            RequestDisposition::success(written)
+            RequestDisposition::success(usable)
         }
         Err(error) => RequestDisposition::error(status_for_error(error)),
     }
@@ -721,27 +770,27 @@ unsafe fn handle_device_control(
         }
         ioctl::SET_BREAK_ON => {
             state.serial().set_break(true);
-            RequestDisposition::success(0)
+            emit_modem_control(state)
         }
         ioctl::SET_BREAK_OFF => {
             state.serial().set_break(false);
-            RequestDisposition::success(0)
+            emit_modem_control(state)
         }
         ioctl::SET_DTR => {
             state.serial().set_dtr(true);
-            RequestDisposition::success(0)
+            emit_modem_control(state)
         }
         ioctl::CLR_DTR => {
             state.serial().set_dtr(false);
-            RequestDisposition::success(0)
+            emit_modem_control(state)
         }
         ioctl::SET_RTS => {
             state.serial().set_rts(true);
-            RequestDisposition::success(0)
+            emit_modem_control(state)
         }
         ioctl::CLR_RTS => {
             state.serial().set_rts(false);
-            RequestDisposition::success(0)
+            emit_modem_control(state)
         }
         ioctl::GET_DTR_RTS | ioctl::GET_MODEM_CONTROL => {
             // SAFETY: The output buffer receives one documented 32-bit serial line bitmap.
@@ -752,7 +801,7 @@ unsafe fn handle_device_control(
             match unsafe { request_input::<u32>(request) } {
                 Ok(value) => {
                     state.serial().set_modem_output(value);
-                    RequestDisposition::success(0)
+                    emit_modem_control(state)
                 }
                 Err(status) => RequestDisposition::error(status),
             }
@@ -824,8 +873,47 @@ fn serial_set<T>(
     };
     let set_result = setter(&mut state.serial(), value);
     match set_result {
-        Ok(()) => RequestDisposition::success(0),
+        Ok(()) => emit_serial_config(state),
         Err(error) => RequestDisposition::error(status_for_serial_error(error)),
+    }
+}
+
+fn emit_serial_config(state: &DeviceState) -> RequestDisposition {
+    let (baud, line, timeouts) = {
+        let serial = state.serial();
+        (serial.baud_rate(), serial.line_control(), serial.timeouts())
+    };
+    let output = state.protocol().serial_config(
+        baud.baud_rate,
+        line.word_length,
+        line.parity,
+        line.stop_bits,
+        timeouts.read_total_timeout_constant,
+        timeouts.write_total_timeout_constant,
+    );
+    apply_optional_protocol_output(state, output)
+}
+
+fn emit_modem_control(state: &DeviceState) -> RequestDisposition {
+    let mask = state.serial().modem_control_mask();
+    let output = state.protocol().modem_control(mask);
+    apply_optional_protocol_output(state, output)
+}
+
+fn apply_optional_protocol_output(
+    state: &DeviceState,
+    output: Result<Option<ProtocolOutput>, DriverProtocolError>,
+) -> RequestDisposition {
+    match output {
+        Ok(Some(output)) => {
+            // SAFETY: Every caller runs inside a live WDF device callback.
+            match unsafe { apply_protocol_outputs(state, vec![output]) } {
+                Ok(()) => RequestDisposition::success(0),
+                Err(error) => RequestDisposition::error(status_for_error(error)),
+            }
+        }
+        Ok(None) => RequestDisposition::success(0),
+        Err(error) => RequestDisposition::error(status_for_protocol_error(error)),
     }
 }
 
@@ -980,6 +1068,17 @@ unsafe fn purge_queues(state: &DeviceState, request: WDFREQUEST) -> RequestDispo
         // SAFETY: This manual queue belongs to the application side of this device.
         unsafe { drain_pending_reads(state.queue_for(ChannelRole::Application), STATUS_CANCELLED) };
     }
+    let purge_output = state.protocol().purge(mask);
+    match purge_output {
+        Ok(Some(output)) => {
+            // SAFETY: The daemon queue belongs to this live device.
+            if let Err(error) = unsafe { apply_protocol_outputs(state, vec![output]) } {
+                return RequestDisposition::error(status_for_error(error));
+            }
+        }
+        Ok(None) => {}
+        Err(error) => return RequestDisposition::error(status_for_protocol_error(error)),
+    }
     RequestDisposition::success(0)
 }
 
@@ -989,18 +1088,17 @@ unsafe fn immediate_char(state: &DeviceState, request: WDFREQUEST) -> RequestDis
         Ok(byte) => byte,
         Err(status) => return RequestDisposition::error(status),
     };
-    let write_result = state
-        .channel()
-        .plane
-        .write(ChannelRole::Application, &[byte]);
-    match write_result {
-        Ok(_) => {
+    let output = state.protocol().application_data(&[byte]);
+    match output {
+        Ok(output) => {
             state.serial().signal_transmit_empty();
-            // SAFETY: The daemon read queue belongs to this device.
-            unsafe { service_pending_reads(state, ChannelRole::Daemon) };
-            RequestDisposition::success(0)
+            // SAFETY: The daemon queue belongs to this live device.
+            match unsafe { apply_protocol_outputs(state, vec![output]) } {
+                Ok(()) => RequestDisposition::success(0),
+                Err(error) => RequestDisposition::error(status_for_error(error)),
+            }
         }
-        Err(error) => RequestDisposition::error(status_for_error(error)),
+        Err(error) => RequestDisposition::error(status_for_protocol_error(error)),
     }
 }
 
@@ -1028,22 +1126,66 @@ unsafe fn read_available(
     let usable = requested.min(buffer_length);
     // SAFETY: WDF returned at least `buffer_length` writable bytes.
     let output = unsafe { slice::from_raw_parts_mut(buffer.cast::<u8>(), usable) };
-    let read_result = state.channel().plane.read(role, output);
+    let read_result = match role {
+        ChannelRole::Application => state.channel().plane.read(role, output),
+        ChannelRole::Daemon => state.channel().plane.read_for_daemon(output),
+    };
     match read_result {
-        Ok(read) => RequestDisposition::success(read),
+        Ok(read) => {
+            if role == ChannelRole::Application {
+                let update = state.protocol().application_bytes_released(read);
+                if let Ok(Some(update)) = update {
+                    // SAFETY: Device child queues remain live for the duration of this callback.
+                    let _ = unsafe { apply_protocol_outputs(state, vec![update]) };
+                }
+            }
+            RequestDisposition::success(read)
+        }
         Err(error) => RequestDisposition::error(status_for_error(error)),
     }
+}
+
+unsafe fn apply_protocol_outputs(
+    state: &DeviceState,
+    outputs: Vec<ProtocolOutput>,
+) -> Result<(), DataPlaneError> {
+    for output in outputs {
+        match output {
+            ProtocolOutput::ToDaemon(bytes) => {
+                state.channel().plane.write_to_daemon(&bytes)?;
+                // SAFETY: The daemon read queue belongs to this device.
+                unsafe { service_pending_reads(state, ChannelRole::Daemon) };
+            }
+            ProtocolOutput::ToApplication(bytes) => {
+                let queued = {
+                    let mut channel = state.channel();
+                    channel.plane.write(ChannelRole::Daemon, &bytes)?;
+                    channel.plane.incoming_len(ChannelRole::Application)
+                };
+                state.serial().signal_receive(&bytes, queued);
+                // SAFETY: The application read queue belongs to this device.
+                unsafe { service_pending_reads(state, ChannelRole::Application) };
+                // SAFETY: The wait-request queue belongs to this device.
+                unsafe { service_wait_request(state) };
+            }
+            ProtocolOutput::ModemStatus(mask) => {
+                state.serial().set_modem_input(mask);
+                // SAFETY: The wait-request queue belongs to this device.
+                unsafe { service_wait_request(state) };
+            }
+        }
+    }
+    Ok(())
 }
 
 unsafe fn service_pending_reads(state: &DeviceState, role: ChannelRole) {
     let queue = state.queue_for(role);
     loop {
-        if state
-            .channel()
-            .plane
-            .available_to_read(role)
-            .map_or(true, |available| available == 0)
-        {
+        let available = match role {
+            ChannelRole::Application => state.channel().plane.available_to_read(role),
+            ChannelRole::Daemon => state.channel().plane.available_for_daemon(),
+        };
+        if available.map_or(true, |available| available == 0) {
             break;
         }
         let mut request: WDFREQUEST = ptr::null_mut();
@@ -1253,6 +1395,22 @@ const fn status_for_error(error: DataPlaneError) -> NTSTATUS {
 
 const fn status_for_serial_error(_error: SerialStateError) -> NTSTATUS {
     STATUS_INVALID_PARAMETER
+}
+
+const fn status_for_protocol_error(error: DriverProtocolError) -> NTSTATUS {
+    match error {
+        DriverProtocolError::NotReady
+        | DriverProtocolError::NotAttached
+        | DriverProtocolError::Session => STATUS_DEVICE_NOT_CONNECTED,
+        DriverProtocolError::Credit | DriverProtocolError::ReceiveWindow => STATUS_BUFFER_OVERFLOW,
+        DriverProtocolError::Framing
+        | DriverProtocolError::Version
+        | DriverProtocolError::Features
+        | DriverProtocolError::FrameLimit
+        | DriverProtocolError::WrongEndpoint
+        | DriverProtocolError::Sequence
+        | DriverProtocolError::Encoding => STATUS_INVALID_PARAMETER,
+    }
 }
 
 fn struct_size<T>() -> ULONG {

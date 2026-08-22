@@ -12,4 +12,6 @@ mod data_plane;
 #[cfg_attr(test, allow(dead_code))]
 mod interop;
 #[cfg_attr(test, allow(dead_code))]
+mod private_protocol;
+#[cfg_attr(test, allow(dead_code))]
 mod serial;

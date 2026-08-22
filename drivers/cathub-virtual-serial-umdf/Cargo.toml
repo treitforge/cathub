@@ -21,6 +21,7 @@ crate-type = ["cdylib"]
 wdk-build = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
 
 [dependencies]
+cathub-virtual-serial = { path = "../../crates/cathub-virtual-serial", default-features = false }
 wdk = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
 wdk-sys = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
 

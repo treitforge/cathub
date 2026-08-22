@@ -427,6 +427,13 @@ impl SerialState {
         self.modem_output
     }
 
+    /// Return DTR/RTS plus the private-protocol break bit.
+    #[must_use]
+    pub const fn modem_control_mask(&self) -> u32 {
+        const BREAK_OUTPUT: u32 = 0x0000_0004;
+        self.modem_output | if self.break_active { BREAK_OUTPUT } else { 0 }
+    }
+
     pub const fn set_modem_output(&mut self, value: u32) {
         self.modem_output = value & modem::OUTPUT;
     }

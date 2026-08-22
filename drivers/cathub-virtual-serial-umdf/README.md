@@ -87,6 +87,11 @@ queue status, purge, immediate characters, and `WaitCommEvent`. Unsupported IOCT
 Each WDF device owns its transport state and pending-read queues through typed object context, and
 the context's destroy callback releases the Rust-owned state during device teardown.
 
-The private daemon handle remains a raw-byte channel. It does not yet decode the shared framing
-contract or restrict the interface to a service SID. The application COM path and driver package
-must still be installed and verified on the isolated driver-development target.
+The private daemon handle implements the shared `CHVS` 1.0 framing contract, including version
+negotiation, discovery, attach/detach, lifecycle events, framed data, receive credit, serial and
+modem events, purge, health checks, and deterministic protocol rejection. Its application data is
+kept separate from driver control frames.
+
+The private interface is not yet restricted to a service SID. The application COM path, private
+CatHub adapter, and driver package must still be verified together on the isolated
+driver-development target.

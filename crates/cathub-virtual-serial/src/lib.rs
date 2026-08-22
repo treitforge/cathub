@@ -5,5 +5,6 @@
 
 #![allow(clippy::doc_markdown)]
 
+#[cfg(feature = "conformance")]
 pub mod conformance;
 pub mod protocol;

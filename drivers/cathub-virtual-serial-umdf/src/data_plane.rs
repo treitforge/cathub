@@ -119,6 +119,25 @@ impl EndpointDataPlane {
         Ok(bytes.len())
     }
 
+    /// Append one driver-generated private frame for the connected daemon.
+    pub fn write_to_daemon(&mut self, bytes: &[u8]) -> Result<usize, DataPlaneError> {
+        self.require_open(ChannelRole::Daemon)?;
+        self.application_to_daemon.try_push(bytes)?;
+        Ok(bytes.len())
+    }
+
+    /// Read private driver frames without requiring an application COM handle.
+    pub fn read_for_daemon(&mut self, output: &mut [u8]) -> Result<usize, DataPlaneError> {
+        self.require_open(ChannelRole::Daemon)?;
+        Ok(self.application_to_daemon.pop_into(output))
+    }
+
+    /// Return private bytes waiting for the daemon.
+    pub fn available_for_daemon(&self) -> Result<usize, DataPlaneError> {
+        self.require_open(ChannelRole::Daemon)?;
+        Ok(self.application_to_daemon.len())
+    }
+
     /// Remove up to `output.len()` bytes waiting for the supplied role.
     ///
     /// # Errors
@@ -355,5 +374,16 @@ mod tests {
         assert_eq!(plane.outgoing_len(ChannelRole::Application), 3);
         plane.clear_outgoing(ChannelRole::Application);
         assert_eq!(plane.outgoing_len(ChannelRole::Application), 0);
+    }
+
+    #[test]
+    fn driver_control_frames_do_not_require_application_open() {
+        let mut plane = EndpointDataPlane::new(32);
+        plane.open(ChannelRole::Daemon).expect("daemon");
+        plane.write_to_daemon(b"hello").expect("control frame");
+        assert_eq!(plane.available_for_daemon(), Ok(5));
+        let mut output = [0_u8; 8];
+        assert_eq!(plane.read_for_daemon(&mut output), Ok(5));
+        assert_eq!(&output[..5], b"hello");
     }
 }
