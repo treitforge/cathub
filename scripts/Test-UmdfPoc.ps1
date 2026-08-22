@@ -246,11 +246,12 @@ try {
         }
         $signTool = Find-SignTool
         Invoke-Checked cargo @(
-            'make', 'package-unsigned', '--target', 'x86_64-pc-windows-msvc'
+            'make', 'package-unsigned', '--release', '--locked',
+            '--target', 'x86_64-pc-windows-msvc'
         )
 
         $packageRoot = Join-Path $driverRoot `
-            'target\x86_64-pc-windows-msvc\debug\cathub_virtual_serial_umdf_package'
+            'target\x86_64-pc-windows-msvc\release\cathub_virtual_serial_umdf_package'
         $catalogPath = Join-Path $packageRoot 'cathub_virtual_serial_umdf.cat'
         $certificatePath = Join-Path $packageRoot 'cathub_umdf_test.cer'
         $manifestPath = Join-Path $packageRoot 'package-manifest.json'
@@ -283,7 +284,8 @@ try {
             Assert-Command $command
         }
         Invoke-Checked cargo @(
-            'make', 'package-unsigned', '--target', 'x86_64-pc-windows-msvc'
+            'make', 'package-unsigned', '--release', '--locked',
+            '--target', 'x86_64-pc-windows-msvc'
         )
     }
     else {

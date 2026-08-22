@@ -48,13 +48,13 @@ From the repository root, run the driver-only check:
 .\scripts\Test-UmdfPoc.ps1
 ```
 
-To build and validate an unsigned package without creating a certificate:
+To build and validate a locked release package without creating a certificate:
 
 ```powershell
 .\scripts\Test-UmdfPoc.ps1 -Action ValidatePackage
 ```
 
-Produce a test-signed package for an isolated driver-development target with:
+Produce a test-signed release package for an isolated driver-development target with:
 
 ```powershell
 .\scripts\Test-UmdfPoc.ps1 -Action Package
