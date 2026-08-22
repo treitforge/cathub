@@ -71,3 +71,19 @@ jobs:
       - name: Build, test, and lint pure-Rust UMDF driver
         shell: pwsh
         run: .\scripts\Test-UmdfPoc.ps1
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Audit application dependencies
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check
+          command-arguments: advisories bans sources
+      - name: Audit UMDF driver dependencies
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check
+          command-arguments: advisories bans sources
+          manifest-path: drivers/cathub-virtual-serial-umdf/Cargo.toml
