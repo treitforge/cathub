@@ -770,7 +770,7 @@ mod platform {
             }
         }
         owned.sort_by(|left, right| left.stable_id.cmp(&right.stable_id));
-        claims.sort_by(|left, right| com_number(&left.com_port).cmp(&com_number(&right.com_port)));
+        claims.sort_by_key(|claim| com_number(&claim.com_port));
         Ok(SystemSnapshot { owned, claims })
     }
 
