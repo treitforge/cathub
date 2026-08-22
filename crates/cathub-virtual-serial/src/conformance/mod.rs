@@ -37,6 +37,8 @@ pub enum CaseId {
     QueueStatus,
     /// Bounded-buffer overflow fails atomically and leaves the handle usable.
     BufferSaturation,
+    /// The COM device allows one application handle and reopens after close.
+    ExclusiveOpen,
 }
 
 impl CaseId {
@@ -54,6 +56,7 @@ impl CaseId {
             Self::ModemControl => "modem_control",
             Self::QueueStatus => "queue_status",
             Self::BufferSaturation => "buffer_saturation",
+            Self::ExclusiveOpen => "exclusive_open",
         }
     }
 }

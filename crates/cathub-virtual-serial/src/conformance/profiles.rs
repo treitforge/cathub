@@ -20,6 +20,7 @@ const BASE_CAT: &[ProfileCase] = &[
         CaseId::BufferSaturation,
         "CatHub issue #6 bounded-buffer safety scope",
     ),
+    required(CaseId::ExclusiveOpen, "CatHub issue #6 acceptance scope"),
 ];
 
 const WINKYER: &[ProfileCase] = &[
@@ -42,6 +43,7 @@ const WINKYER: &[ProfileCase] = &[
         CaseId::BufferSaturation,
         "CatHub issue #6 bounded-buffer safety scope",
     ),
+    required(CaseId::ExclusiveOpen, "CatHub issue #6 acceptance scope"),
 ];
 
 const PROFILES: &[ApplicationProfile] = &[

@@ -110,7 +110,8 @@ Integrity, and UMDF event logs. Before starting the real CatHub daemon it also r
 Win32 conformance suite through a loopback-only bridge to the private CHVS channel. That covers
 synchronous and overlapped I/O, pending-read cancellation, read timeouts, purge, `WaitCommEvent`,
 queue status, modem controls, atomic rejection beyond the 64 KiB buffer limit, recovery on the same
-handle, and both CAT 8-N-1 and WinKeyer 8-N-2 line formats without recreating a second COM port.
+handle, exclusive-open/reopen behavior, and both CAT 8-N-1 and WinKeyer 8-N-2 line formats without
+recreating a second COM port.
 After a successful run it removes the endpoint, staged OEM driver package, and
 test certificate and verifies the resulting CatHub inventory. Pass `-KeepInstalled` only when
 retaining that isolated VM state is necessary for debugging; failed runs retain state so the

@@ -117,6 +117,7 @@ fn run_case(
         CaseId::ModemControl => modem_control(application_port),
         CaseId::QueueStatus => queue_status(application_port, peer_target),
         CaseId::BufferSaturation => buffer_saturation(application_port, peer_target),
+        CaseId::ExclusiveOpen => exclusive_open(application_port),
     };
 
     match result {
@@ -443,6 +444,25 @@ fn buffer_saturation(
     Ok(format!(
         "{}-byte write failed atomically with Win32 error {overflow_error}; handle recovered",
         oversized.len()
+    ))
+}
+
+fn exclusive_open(application_port: &str) -> Result<String, ConformanceError> {
+    let first = Port::open(application_port, false)?;
+    let second_error = match Port::open(application_port, false) {
+        Ok(_) => {
+            return Err(ConformanceError::InvalidResult(
+                "a second application handle unexpectedly opened the COM port".to_string(),
+            ));
+        }
+        Err(ConformanceError::Win32 { code, .. }) => code,
+        Err(error) => return Err(error),
+    };
+    drop(first);
+    let reopened = Port::open(application_port, false)?;
+    drop(reopened);
+    Ok(format!(
+        "second handle was rejected with Win32 error {second_error}; reopen after close succeeded"
     ))
 }
 
