@@ -33,11 +33,11 @@ are outside the 0.1 scope.
 
 ```text
 radio applications
-  |-- private virtual serial pairs ------|
+  |-- private virtual serial endpoints --|
   `-- dedicated Hamlib NET listeners ----|--> CatHub --> radio or private rigctld
 
 CW applications
-  |-- private virtual serial pairs ------|
+  |-- private virtual serial endpoints --|
   `-- loopback typed gRPC ---------------|--> CatHub --> physical WinKeyer
 ```
 
@@ -99,9 +99,10 @@ Captured transcripts and tests define compatibility. CatHub does not claim suppo
 
 ### Serial CAT
 
-Each `[[serial_endpoint]]` binds the daemon side of a virtual serial pair. The application
-opens `application_transport`, the other side of that pair. A configured dialect parses the
-client's command stream and translates modeled operations into the shared scheduler.
+Each `[[serial_endpoint]]` either selects a CatHub-owned Windows UMDF endpoint with
+`virtual_endpoint` or binds the daemon side of an externally provisioned virtual serial pair with
+`transport`. The application opens `application_transport` in either case. A configured dialect
+parses the client's command stream and translates modeled operations into the shared scheduler.
 
 The transparent TS-590 dialect relays the real dual-VFO stream and therefore cannot use
 single-VFO presentation. Modeled TS-590 and TS-2000 endpoints can enable `single_vfo` when a
@@ -162,7 +163,7 @@ perms = ["read"]
 
 [[serial_endpoint]]
 name = "contest-logger"
-transport = "COM20"
+virtual_endpoint = "n1mm-cat"
 application_transport = "COM21"
 dialect = "ts590"
 single_vfo = true
