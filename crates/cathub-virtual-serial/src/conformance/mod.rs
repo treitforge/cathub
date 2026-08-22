@@ -35,6 +35,8 @@ pub enum CaseId {
     ModemControl,
     /// Queue counters and error status through `ClearCommError`.
     QueueStatus,
+    /// Bounded-buffer overflow fails atomically and leaves the handle usable.
+    BufferSaturation,
 }
 
 impl CaseId {
@@ -51,6 +53,7 @@ impl CaseId {
             Self::SerialConfiguration => "serial_configuration",
             Self::ModemControl => "modem_control",
             Self::QueueStatus => "queue_status",
+            Self::BufferSaturation => "buffer_saturation",
         }
     }
 }

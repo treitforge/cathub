@@ -1,6 +1,6 @@
 #![allow(unsafe_code, clippy::borrow_as_ptr)]
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::mem::{size_of, zeroed};
 use std::net::{SocketAddr, TcpStream};
 use std::ptr::{null, null_mut};
@@ -30,6 +30,7 @@ use crate::TEST_PEER_READY;
 
 const IO_WAIT_MS: u32 = 2_000;
 const TEST_DATA: &[u8] = b"CatHub serial conformance";
+const DRIVER_BUFFER_CAPACITY: usize = 64 * 1024;
 
 #[derive(Clone, Copy)]
 enum PeerTarget<'a> {
@@ -115,6 +116,7 @@ fn run_case(
         CaseId::SerialConfiguration => serial_configuration(application_port, profile),
         CaseId::ModemControl => modem_control(application_port),
         CaseId::QueueStatus => queue_status(application_port, peer_target),
+        CaseId::BufferSaturation => buffer_saturation(application_port, peer_target),
     };
 
     match result {
@@ -399,6 +401,51 @@ fn queue_status(
     Ok(format!("ClearCommError reported {depth} queued bytes"))
 }
 
+fn buffer_saturation(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
+    let application = Port::open(application_port, false)?;
+    let mut peer = Peer::open(peer_target)?;
+    set_timeout(application.handle(), 500)?;
+
+    let oversized = vec![0xA5_u8; DRIVER_BUFFER_CAPACITY + 1];
+    let length = u32::try_from(oversized.len()).map_err(|_| {
+        ConformanceError::InvalidResult("overflow payload is too large".to_string())
+    })?;
+    let mut written = 0_u32;
+    let succeeded = unsafe {
+        WriteFile(
+            application.handle(),
+            oversized.as_ptr(),
+            length,
+            &mut written,
+            null_mut(),
+        )
+    };
+    if succeeded != 0 {
+        return Err(ConformanceError::InvalidResult(
+            "a write larger than the driver buffer unexpectedly succeeded".to_string(),
+        ));
+    }
+    let overflow_error = unsafe { GetLastError() };
+    if written != 0 {
+        return Err(ConformanceError::InvalidResult(format!(
+            "overflowing write reported {written} partially accepted bytes"
+        )));
+    }
+    peer.require_no_data(Duration::from_millis(150))?;
+
+    let marker = b"after-overflow";
+    write_sync(application.handle(), marker)?;
+    let received = peer.read_exact(marker.len())?;
+    require_equal("post-overflow application write", &received, marker)?;
+    Ok(format!(
+        "{}-byte write failed atomically with Win32 error {overflow_error}; handle recovered",
+        oversized.len()
+    ))
+}
+
 fn set_timeout(handle: HANDLE, milliseconds: u32) -> Result<(), ConformanceError> {
     let mut original: COMMTIMEOUTS = unsafe { zeroed() };
     if unsafe { GetCommTimeouts(handle, &mut original) } == 0 {
@@ -657,6 +704,43 @@ impl Peer {
                 Write::write_all(stream, bytes)?;
                 Write::flush(stream)?;
                 Ok(())
+            }
+        }
+    }
+
+    fn require_no_data(&mut self, timeout: Duration) -> Result<(), ConformanceError> {
+        match self {
+            Self::Serial(port) => {
+                let milliseconds = u32::try_from(timeout.as_millis()).map_err(|_| {
+                    ConformanceError::InvalidResult("peer timeout exceeds u32".to_string())
+                })?;
+                set_timeout(port.handle(), milliseconds)?;
+                let received = read_sync(port.handle(), 1)?;
+                if received.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ConformanceError::InvalidResult(
+                        "overflowing write leaked data to the serial peer".to_string(),
+                    ))
+                }
+            }
+            Self::Tcp(stream) => {
+                stream.set_read_timeout(Some(timeout))?;
+                let mut byte = [0_u8; 1];
+                match Read::read(stream, &mut byte) {
+                    Err(error)
+                        if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
+                    {
+                        Ok(())
+                    }
+                    Ok(0) => Err(ConformanceError::InvalidResult(
+                        "managed test peer disconnected after buffer overflow".to_string(),
+                    )),
+                    Ok(_) => Err(ConformanceError::InvalidResult(
+                        "overflowing write leaked data to the managed peer".to_string(),
+                    )),
+                    Err(error) => Err(error.into()),
+                }
             }
         }
     }
