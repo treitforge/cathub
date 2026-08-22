@@ -557,6 +557,7 @@ fn encode_frame(frame: &Frame, frame_limit: usize) -> Result<ProtocolOutput, Dri
 #[allow(clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use cathub_virtual_serial::daemon::{DaemonEvent, DaemonProtocol};
 
     fn hello(request_id: u64) -> Frame {
         let mut frame = Frame::new(MessageKind::Hello, 0, request_id);
@@ -619,6 +620,17 @@ mod tests {
             panic!("expected daemon output");
         };
         Frame::decode(bytes).expect("decode")
+    }
+
+    fn daemon_events(daemon: &mut DaemonProtocol, outputs: &[ProtocolOutput]) -> Vec<DaemonEvent> {
+        let mut events = Vec::new();
+        for output in outputs {
+            let ProtocolOutput::ToDaemon(bytes) = output else {
+                continue;
+            };
+            events.extend(daemon.ingest(bytes).expect("daemon ingest"));
+        }
+        events
     }
 
     #[test]
@@ -713,5 +725,72 @@ mod tests {
             protocol.ingest_daemon(&data.encode().expect("encode")),
             Err(DriverProtocolError::Sequence)
         );
+    }
+
+    #[test]
+    fn interoperates_with_the_cathub_daemon_state_machine() {
+        let mut driver = DriverProtocol::new();
+        let mut daemon = DaemonProtocol::new();
+
+        let outputs = driver
+            .ingest_daemon(&DaemonProtocol::hello(1).expect("hello"))
+            .expect("driver hello");
+        assert_eq!(
+            daemon_events(&mut daemon, &outputs),
+            vec![DaemonEvent::Negotiated]
+        );
+
+        let outputs = driver
+            .ingest_daemon(&daemon.discover(2).expect("discover"))
+            .expect("driver discovery");
+        let events = daemon_events(&mut daemon, &outputs);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DaemonEvent::Endpoint(endpoint)
+                if endpoint.stable_id == "cathub-default" && endpoint.kind == 1
+        )));
+        assert!(events.contains(&DaemonEvent::DiscoveryComplete));
+
+        driver.application_opened(41).expect("application open");
+        let outputs = driver
+            .ingest_daemon(&daemon.attach(ENDPOINT_ID, 3).expect("attach"))
+            .expect("driver attach");
+        assert_eq!(
+            daemon_events(&mut daemon, &outputs),
+            vec![
+                DaemonEvent::Attached {
+                    endpoint_id: ENDPOINT_ID,
+                    session_id: 41,
+                },
+                DaemonEvent::ApplicationOpen(41),
+            ]
+        );
+
+        let to_daemon = driver.application_data(b"ID;").expect("application data");
+        assert_eq!(
+            daemon_events(&mut daemon, &[to_daemon]),
+            vec![DaemonEvent::Data(b"ID;".to_vec())]
+        );
+        let credit = daemon
+            .release_received(3)
+            .expect("release")
+            .expect("credit frame");
+        assert!(
+            driver
+                .ingest_daemon(&credit)
+                .expect("driver credit")
+                .is_empty()
+        );
+
+        let to_application = daemon.data(b"ID021;").expect("daemon data");
+        assert_eq!(
+            driver.ingest_daemon(&to_application).expect("driver data"),
+            vec![ProtocolOutput::ToApplication(b"ID021;".to_vec())]
+        );
+        let update = driver
+            .application_bytes_released(6)
+            .expect("application release")
+            .expect("window update");
+        assert!(daemon_events(&mut daemon, &[update]).is_empty());
     }
 }
