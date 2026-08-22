@@ -14,18 +14,24 @@ use std::{
 use wdk::println;
 use wdk_sys::{
     _WDF_EXECUTION_LEVEL, _WDF_FILEOBJECT_CLASS, _WDF_IO_QUEUE_DISPATCH_TYPE,
-    _WDF_SYNCHRONIZATION_SCOPE, _WDF_TRI_STATE, BOOLEAN, GUID, NTSTATUS, PCUNICODE_STRING,
-    PDRIVER_OBJECT, PVOID, ULONG, ULONG_PTR, UNICODE_STRING, WDF_DRIVER_CONFIG,
-    WDF_FILEOBJECT_CONFIG, WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
-    WDF_OBJECT_ATTRIBUTES, WDF_OBJECT_CONTEXT_TYPE_INFO, WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER,
-    WDFFILEOBJECT, WDFOBJECT, WDFQUEUE, WDFQUEUE__, WDFREQUEST, call_unsafe_wdf_function_binding,
+    _WDF_SYNCHRONIZATION_SCOPE, _WDF_TRI_STATE, BOOLEAN, GUID, KEY_QUERY_VALUE, NTSTATUS,
+    PCUNICODE_STRING, PDRIVER_OBJECT, PLUGPLAY_REGKEY_DEVICE, PVOID, ULONG, ULONG_PTR,
+    UNICODE_STRING, WDF_DRIVER_CONFIG, WDF_FILEOBJECT_CONFIG, WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE,
+    WDF_NO_OBJECT_ATTRIBUTES, WDF_OBJECT_ATTRIBUTES, WDF_OBJECT_CONTEXT_TYPE_INFO, WDFDEVICE,
+    WDFDEVICE_INIT, WDFDRIVER, WDFFILEOBJECT, WDFKEY, WDFOBJECT, WDFQUEUE, WDFQUEUE__, WDFREQUEST,
+    call_unsafe_wdf_function_binding,
 };
 
 use crate::data_plane::{ChannelRole, DEFAULT_BUFFER_CAPACITY, DataPlaneError, EndpointDataPlane};
+use crate::serial::{
+    SerialBaudRate, SerialChars, SerialCommProperties, SerialHandflow, SerialLineControl,
+    SerialQueueSize, SerialState, SerialStateError, SerialStatus, SerialTimeouts, ioctl, purge,
+};
 
 const STATUS_SUCCESS: NTSTATUS = 0;
 const STATUS_UNSUCCESSFUL: NTSTATUS = -1_073_741_823;
 const STATUS_INVALID_DEVICE_REQUEST: NTSTATUS = -1_073_741_808;
+const STATUS_INVALID_PARAMETER: NTSTATUS = -1_073_741_811;
 const STATUS_OBJECT_NAME_INVALID: NTSTATUS = -1_073_741_773;
 const STATUS_SHARING_VIOLATION: NTSTATUS = -1_073_741_757;
 const STATUS_DEVICE_NOT_CONNECTED: NTSTATUS = -1_073_741_667;
@@ -33,8 +39,11 @@ const STATUS_CANCELLED: NTSTATUS = -1_073_741_536;
 const STATUS_BUFFER_OVERFLOW: NTSTATUS = -2_147_483_643;
 const TRUE: BOOLEAN = 1;
 
-const APPLICATION_REFERENCE: [u16; 12] = [97, 112, 112, 108, 105, 99, 97, 116, 105, 111, 110, 0];
 const DAEMON_REFERENCE: [u16; 7] = [100, 97, 101, 109, 111, 110, 0];
+const PORT_NAME_VALUE: [u16; 9] = [80, 111, 114, 116, 78, 97, 109, 101, 0];
+const DOS_DEVICE_PREFIX: &[u16] = &[
+    92, 68, 111, 115, 68, 101, 118, 105, 99, 101, 115, 92, 71, 108, 111, 98, 97, 108, 92,
+];
 
 /// Private proof-of-concept interface, `{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`.
 static CATHUB_POC_INTERFACE_GUID: GUID = GUID {
@@ -44,6 +53,14 @@ static CATHUB_POC_INTERFACE_GUID: GUID = GUID {
     Data4: [0xAF, 0x84, 0x0F, 0x4E, 0x46, 0xB7, 0x09, 0x01],
 };
 
+/// Standard Windows COM-port interface, `{86E0D1E0-8089-11D0-9CE4-08003E301F73}`.
+static GUID_DEVINTERFACE_COMPORT: GUID = GUID {
+    Data1: 0x86E0_D1E0,
+    Data2: 0x8089,
+    Data3: 0x11D0,
+    Data4: [0x9C, 0xE4, 0x08, 0x00, 0x3E, 0x30, 0x1F, 0x73],
+};
+
 #[repr(C)]
 struct DeviceContext {
     state: *mut DeviceState,
@@ -51,16 +68,22 @@ struct DeviceContext {
 
 struct DeviceState {
     channel: Mutex<ChannelState>,
+    serial: Mutex<SerialState>,
     application_reads: AtomicPtr<WDFQUEUE__>,
     daemon_reads: AtomicPtr<WDFQUEUE__>,
+    wait_requests: AtomicPtr<WDFQUEUE__>,
 }
 
 impl DeviceState {
     fn new() -> Self {
+        let mut serial = SerialState::default();
+        serial.set_modem_input(serial.modem_input());
         Self {
             channel: Mutex::new(ChannelState::new()),
+            serial: Mutex::new(serial),
             application_reads: AtomicPtr::new(ptr::null_mut()),
             daemon_reads: AtomicPtr::new(ptr::null_mut()),
+            wait_requests: AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -75,6 +98,16 @@ impl DeviceState {
             ChannelRole::Application => self.application_reads.load(Ordering::Acquire),
             ChannelRole::Daemon => self.daemon_reads.load(Ordering::Acquire),
         }
+    }
+
+    fn serial(&self) -> MutexGuard<'_, SerialState> {
+        self.serial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn wait_queue(&self) -> WDFQUEUE {
+        self.wait_requests.load(Ordering::Acquire)
     }
 }
 
@@ -288,6 +321,14 @@ unsafe fn configure_queues(device: WDFDEVICE, state: &DeviceState) -> NTSTATUS {
     }
     state.daemon_reads.store(daemon_reads, Ordering::Release);
 
+    let mut wait_requests = ptr::null_mut();
+    // SAFETY: The device and output storage are valid for synchronous queue creation.
+    let status = unsafe { create_manual_read_queue(device, &raw mut wait_requests) };
+    if !nt_success(status) {
+        return status;
+    }
+    state.wait_requests.store(wait_requests, Ordering::Release);
+
     let mut default_queue: WDFQUEUE = ptr::null_mut();
     let mut config = WDF_IO_QUEUE_CONFIG {
         Size: struct_size::<WDF_IO_QUEUE_CONFIG>(),
@@ -298,6 +339,7 @@ unsafe fn configure_queues(device: WDFDEVICE, state: &DeviceState) -> NTSTATUS {
         EvtIoDefault: Some(evt_io_default),
         EvtIoRead: Some(evt_io_read),
         EvtIoWrite: Some(evt_io_write),
+        EvtIoDeviceControl: Some(evt_io_device_control),
         ..WDF_IO_QUEUE_CONFIG::default()
     };
     // SAFETY: WDF copies the config; null attributes are allowed and output storage is valid.
@@ -333,16 +375,20 @@ unsafe fn create_manual_read_queue(device: WDFDEVICE, queue: *mut WDFQUEUE) -> N
 }
 
 unsafe fn register_interfaces(device: WDFDEVICE) -> NTSTATUS {
-    let application = unicode_string(&APPLICATION_REFERENCE);
-    // SAFETY: All pointers remain valid through this synchronous call.
+    // SAFETY: The device is live and the interface GUID has static storage.
     let status = unsafe {
         call_unsafe_wdf_function_binding!(
             WdfDeviceCreateDeviceInterface,
             device,
-            &raw const CATHUB_POC_INTERFACE_GUID,
-            &raw const application,
+            &raw const GUID_DEVINTERFACE_COMPORT,
+            ptr::null(),
         )
     };
+    if !nt_success(status) {
+        return status;
+    }
+    // SAFETY: The device instance key and PortName value are owned by Windows Ports setup.
+    let status = unsafe { create_com_symbolic_link(device) };
     if !nt_success(status) {
         return status;
     }
@@ -354,6 +400,60 @@ unsafe fn register_interfaces(device: WDFDEVICE) -> NTSTATUS {
             device,
             &raw const CATHUB_POC_INTERFACE_GUID,
             &raw const daemon,
+        )
+    }
+}
+
+unsafe fn create_com_symbolic_link(device: WDFDEVICE) -> NTSTATUS {
+    let mut key: WDFKEY = ptr::null_mut();
+    // SAFETY: The device is live, null attributes are allowed, and output storage is valid.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceOpenRegistryKey,
+            device,
+            PLUGPLAY_REGKEY_DEVICE,
+            KEY_QUERY_VALUE,
+            WDF_NO_OBJECT_ATTRIBUTES,
+            &raw mut key,
+        )
+    };
+    if !nt_success(status) {
+        return status;
+    }
+
+    let value_name = unicode_string(&PORT_NAME_VALUE);
+    let mut port_buffer = [0_u16; 64];
+    let mut port_name = unicode_string_buffer(&mut port_buffer);
+    // SAFETY: `key` is open, and both counted strings remain valid through the call.
+    let query_status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRegistryQueryUnicodeString,
+            key,
+            &raw const value_name,
+            ptr::null_mut(),
+            &raw mut port_name,
+        )
+    };
+    // SAFETY: This driver owns the WDF registry-key handle returned above.
+    unsafe { call_unsafe_wdf_function_binding!(WdfRegistryClose, key) };
+    if !nt_success(query_status) {
+        return query_status;
+    }
+    let port_units = usize::from(port_name.Length) / size_of::<u16>();
+    if port_units == 0 || port_units >= port_buffer.len() {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    let mut link = Vec::with_capacity(DOS_DEVICE_PREFIX.len() + port_units + 1);
+    link.extend_from_slice(DOS_DEVICE_PREFIX);
+    link.extend_from_slice(port_buffer.get(..port_units).unwrap_or_default());
+    link.push(0);
+    let symbolic_link = unicode_string(&link);
+    // SAFETY: The device is live and the counted link string remains valid synchronously.
+    unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceCreateSymbolicLink,
+            device,
+            &raw const symbolic_link,
         )
     }
 }
@@ -404,6 +504,8 @@ unsafe extern "C" fn evt_file_cleanup(file: WDFFILEOBJECT) {
             };
             // SAFETY: This handle refers to a manual queue owned by this device.
             unsafe { drain_pending_reads(state.queue_for(ChannelRole::Daemon), STATUS_CANCELLED) };
+            // SAFETY: This handle refers to a manual queue owned by this device.
+            unsafe { drain_pending_reads(state.wait_queue(), STATUS_CANCELLED) };
         }
     });
 }
@@ -427,6 +529,23 @@ unsafe extern "C" fn evt_io_write(queue: WDFQUEUE, request: WDFREQUEST, length: 
         };
         // SAFETY: WDF transfers the valid request to this write callback.
         unsafe { handle_write(state, request, length) }
+    });
+}
+
+unsafe extern "C" fn evt_io_device_control(
+    queue: WDFQUEUE,
+    request: WDFREQUEST,
+    _output_length: usize,
+    _input_length: usize,
+    control_code: ULONG,
+) {
+    dispatch_request(request, || {
+        // SAFETY: WDF keeps the queue's parent device alive for this callback.
+        let Some(state) = (unsafe { device_state_from_queue(queue) }) else {
+            return RequestDisposition::error(STATUS_UNSUCCESSFUL);
+        };
+        // SAFETY: WDF transfers the valid request to this device-control callback.
+        unsafe { handle_device_control(state, request, control_code) }
     });
 }
 
@@ -518,9 +637,368 @@ unsafe fn handle_write(
     let write_result = state.channel().plane.write(role, input);
     match write_result {
         Ok(written) => {
+            if role == ChannelRole::Application {
+                state.serial().signal_transmit_empty();
+            } else {
+                let queued = state.channel().plane.incoming_len(ChannelRole::Application);
+                state.serial().signal_receive(input, queued);
+            }
+            // SAFETY: The wait-request queue belongs to this device.
+            unsafe { service_wait_request(state) };
             // SAFETY: The peer's pending queue belongs to this device.
             unsafe { service_pending_reads(state, role.peer()) };
             RequestDisposition::success(written)
+        }
+        Err(error) => RequestDisposition::error(status_for_error(error)),
+    }
+}
+
+// An exhaustive IOCTL table is easier to audit when kept as one dispatch function.
+#[allow(clippy::too_many_lines)]
+unsafe fn handle_device_control(
+    state: &DeviceState,
+    request: WDFREQUEST,
+    control_code: u32,
+) -> RequestDisposition {
+    // SAFETY: The invoking WDF callback owns this request.
+    let Some((role, file)) = (unsafe { request_identity(request) }) else {
+        return RequestDisposition::error(STATUS_OBJECT_NAME_INVALID);
+    };
+    if role != ChannelRole::Application || !state.channel().owns(role, file) {
+        return RequestDisposition::error(STATUS_INVALID_DEVICE_REQUEST);
+    }
+
+    match control_code {
+        ioctl::SET_BAUD_RATE => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            let value = unsafe { request_input::<SerialBaudRate>(request) };
+            serial_set(value, SerialState::set_baud_rate, state)
+        }
+        ioctl::GET_BAUD_RATE => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            unsafe { request_output(request, &state.serial().baud_rate()) }
+        }
+        ioctl::SET_QUEUE_SIZE => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            let value = unsafe { request_input::<SerialQueueSize>(request) };
+            serial_set(value, |serial, value| serial.set_queue_size(value), state)
+        }
+        ioctl::SET_LINE_CONTROL => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            let value = unsafe { request_input::<SerialLineControl>(request) };
+            serial_set(value, SerialState::set_line_control, state)
+        }
+        ioctl::GET_LINE_CONTROL => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            unsafe { request_output(request, &state.serial().line_control()) }
+        }
+        ioctl::SET_TIMEOUTS => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            let value = unsafe { request_input::<SerialTimeouts>(request) };
+            serial_set(value, SerialState::set_timeouts, state)
+        }
+        ioctl::GET_TIMEOUTS => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            unsafe { request_output(request, &state.serial().timeouts()) }
+        }
+        ioctl::SET_CHARS => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            let value = unsafe { request_input::<SerialChars>(request) };
+            serial_set(value, SerialState::set_chars, state)
+        }
+        ioctl::GET_CHARS => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            unsafe { request_output(request, &state.serial().chars()) }
+        }
+        ioctl::SET_HANDFLOW => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            let value = unsafe { request_input::<SerialHandflow>(request) };
+            serial_set(value, SerialState::set_handflow, state)
+        }
+        ioctl::GET_HANDFLOW => {
+            // SAFETY: The request is a buffered serial IOCTL with this documented layout.
+            unsafe { request_output(request, &state.serial().handflow()) }
+        }
+        ioctl::SET_BREAK_ON => {
+            state.serial().set_break(true);
+            RequestDisposition::success(0)
+        }
+        ioctl::SET_BREAK_OFF => {
+            state.serial().set_break(false);
+            RequestDisposition::success(0)
+        }
+        ioctl::SET_DTR => {
+            state.serial().set_dtr(true);
+            RequestDisposition::success(0)
+        }
+        ioctl::CLR_DTR => {
+            state.serial().set_dtr(false);
+            RequestDisposition::success(0)
+        }
+        ioctl::SET_RTS => {
+            state.serial().set_rts(true);
+            RequestDisposition::success(0)
+        }
+        ioctl::CLR_RTS => {
+            state.serial().set_rts(false);
+            RequestDisposition::success(0)
+        }
+        ioctl::GET_DTR_RTS | ioctl::GET_MODEM_CONTROL => {
+            // SAFETY: The output buffer receives one documented 32-bit serial line bitmap.
+            unsafe { request_output(request, &state.serial().modem_output()) }
+        }
+        ioctl::SET_MODEM_CONTROL => {
+            // SAFETY: The input buffer contains one documented 32-bit serial line bitmap.
+            match unsafe { request_input::<u32>(request) } {
+                Ok(value) => {
+                    state.serial().set_modem_output(value);
+                    RequestDisposition::success(0)
+                }
+                Err(status) => RequestDisposition::error(status),
+            }
+        }
+        ioctl::GET_MODEM_STATUS => {
+            // SAFETY: The output buffer receives one documented 32-bit modem status bitmap.
+            unsafe { request_output(request, &state.serial().modem_input()) }
+        }
+        ioctl::SET_FIFO_CONTROL => {
+            // SAFETY: The input buffer contains one documented 32-bit FIFO value.
+            match unsafe { request_input::<u32>(request) } {
+                Ok(value) => {
+                    state.serial().set_fifo_control(value);
+                    RequestDisposition::success(0)
+                }
+                Err(status) => RequestDisposition::error(status),
+            }
+        }
+        ioctl::GET_WAIT_MASK => {
+            // SAFETY: The output buffer receives one documented 32-bit wait mask.
+            unsafe { request_output(request, &state.serial().wait_mask()) }
+        }
+        ioctl::SET_WAIT_MASK => {
+            // SAFETY: `set_wait_mask` owns any request retrieved from the manual wait queue.
+            unsafe { set_wait_mask(state, request) }
+        }
+        ioctl::WAIT_ON_MASK => {
+            // SAFETY: The request remains owned by this callback or is forwarded exactly once.
+            unsafe { wait_on_mask(state, request) }
+        }
+        ioctl::PURGE => {
+            // SAFETY: `purge_queues` reads the documented mask and owns affected queued requests.
+            unsafe { purge_queues(state, request) }
+        }
+        ioctl::GET_COMM_STATUS => {
+            let (input, output) = {
+                let channel = state.channel();
+                (
+                    channel.plane.incoming_len(ChannelRole::Application),
+                    channel.plane.outgoing_len(ChannelRole::Application),
+                )
+            };
+            let status: SerialStatus = state.serial().status(input, output);
+            // SAFETY: The output buffer receives the documented serial status layout.
+            unsafe { request_output(request, &status) }
+        }
+        ioctl::GET_PROPERTIES => {
+            let properties: SerialCommProperties = state.serial().properties();
+            // SAFETY: The output buffer receives the documented serial properties layout.
+            unsafe { request_output(request, &properties) }
+        }
+        ioctl::IMMEDIATE_CHAR => {
+            // SAFETY: The input buffer contains the immediate byte.
+            unsafe { immediate_char(state, request) }
+        }
+        ioctl::RESET_DEVICE | ioctl::SET_XON | ioctl::SET_XOFF => RequestDisposition::success(0),
+        _ => RequestDisposition::error(STATUS_INVALID_DEVICE_REQUEST),
+    }
+}
+
+fn serial_set<T>(
+    value: Result<T, NTSTATUS>,
+    setter: impl FnOnce(&mut SerialState, T) -> Result<(), SerialStateError>,
+    state: &DeviceState,
+) -> RequestDisposition {
+    let value = match value {
+        Ok(value) => value,
+        Err(status) => return RequestDisposition::error(status),
+    };
+    let set_result = setter(&mut state.serial(), value);
+    match set_result {
+        Ok(()) => RequestDisposition::success(0),
+        Err(error) => RequestDisposition::error(status_for_serial_error(error)),
+    }
+}
+
+unsafe fn request_input<T: Copy>(request: WDFREQUEST) -> Result<T, NTSTATUS> {
+    let mut buffer: PVOID = ptr::null_mut();
+    let mut length = 0;
+    // SAFETY: WDF owns the request and returns a buffer valid until request completion.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRequestRetrieveInputBuffer,
+            request,
+            size_of::<T>(),
+            &raw mut buffer,
+            &raw mut length,
+        )
+    };
+    if !nt_success(status) {
+        return Err(status);
+    }
+    if buffer.is_null() || length < size_of::<T>() {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
+    // SAFETY: WDF returned at least `size_of::<T>()` readable bytes; unaligned handles any layout.
+    Ok(unsafe { ptr::read_unaligned(buffer.cast::<T>()) })
+}
+
+unsafe fn request_output<T: Copy>(request: WDFREQUEST, value: &T) -> RequestDisposition {
+    let mut buffer: PVOID = ptr::null_mut();
+    let mut length = 0;
+    // SAFETY: WDF owns the request and returns a buffer valid until request completion.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRequestRetrieveOutputBuffer,
+            request,
+            size_of::<T>(),
+            &raw mut buffer,
+            &raw mut length,
+        )
+    };
+    if !nt_success(status) {
+        return RequestDisposition::error(status);
+    }
+    if buffer.is_null() || length < size_of::<T>() {
+        return RequestDisposition::error(STATUS_INVALID_PARAMETER);
+    }
+    // SAFETY: WDF returned at least `size_of::<T>()` writable bytes; unaligned handles any layout.
+    unsafe { ptr::write_unaligned(buffer.cast::<T>(), *value) };
+    RequestDisposition::success(size_of::<T>())
+}
+
+unsafe fn set_wait_mask(state: &DeviceState, request: WDFREQUEST) -> RequestDisposition {
+    // SAFETY: The input buffer contains one documented 32-bit wait mask.
+    let mask = match unsafe { request_input::<u32>(request) } {
+        Ok(mask) => mask,
+        Err(status) => return RequestDisposition::error(status),
+    };
+    let set_result = state.serial().set_wait_mask(mask);
+    if let Err(error) = set_result {
+        return RequestDisposition::error(status_for_serial_error(error));
+    }
+    let mut pending: WDFREQUEST = ptr::null_mut();
+    // SAFETY: The manual queue belongs to this device and output storage is valid.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfIoQueueRetrieveNextRequest,
+            state.wait_queue(),
+            &raw mut pending,
+        )
+    };
+    if nt_success(status) {
+        // SAFETY: Retrieval transferred ownership of the pending wait request.
+        let disposition = unsafe { request_output(pending, &0_u32) };
+        // SAFETY: The retrieved request is no longer owned by the manual queue.
+        unsafe { finish_request(pending, disposition) };
+    }
+    RequestDisposition::success(0)
+}
+
+unsafe fn wait_on_mask(state: &DeviceState, request: WDFREQUEST) -> RequestDisposition {
+    if state.serial().wait_mask() == 0 {
+        return RequestDisposition::error(STATUS_INVALID_PARAMETER);
+    }
+    let ready_events = state.serial().take_wait_events();
+    if let Some(events) = ready_events {
+        // SAFETY: The output buffer receives one documented 32-bit event mask.
+        return unsafe { request_output(request, &events) };
+    }
+    let mut previous: WDFREQUEST = ptr::null_mut();
+    // SAFETY: The manual queue belongs to this device and output storage is valid.
+    let retrieved = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfIoQueueRetrieveNextRequest,
+            state.wait_queue(),
+            &raw mut previous,
+        )
+    };
+    if nt_success(retrieved) {
+        // SAFETY: Retrieval transferred ownership of the superseded request.
+        unsafe { complete_request(previous, STATUS_UNSUCCESSFUL, 0) };
+    }
+    // SAFETY: The request is framework-owned and target is a valid manual queue.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(WdfRequestForwardToIoQueue, request, state.wait_queue(),)
+    };
+    if nt_success(status) {
+        RequestDisposition::Pending
+    } else {
+        RequestDisposition::error(status)
+    }
+}
+
+unsafe fn service_wait_request(state: &DeviceState) {
+    let Some(events) = state.serial().take_wait_events() else {
+        return;
+    };
+    let mut request: WDFREQUEST = ptr::null_mut();
+    // SAFETY: The manual queue belongs to this device and output storage is valid.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfIoQueueRetrieveNextRequest,
+            state.wait_queue(),
+            &raw mut request,
+        )
+    };
+    if nt_success(status) {
+        // SAFETY: Retrieval transferred the queued request and its buffer remains valid.
+        let disposition = unsafe { request_output(request, &events) };
+        // SAFETY: The retrieved request is no longer owned by the queue.
+        unsafe { finish_request(request, disposition) };
+    }
+}
+
+unsafe fn purge_queues(state: &DeviceState, request: WDFREQUEST) -> RequestDisposition {
+    // SAFETY: The input buffer contains one documented 32-bit purge mask.
+    let mask = match unsafe { request_input::<u32>(request) } {
+        Ok(mask) => mask,
+        Err(status) => return RequestDisposition::error(status),
+    };
+    if let Err(error) = SerialState::validate_purge(mask) {
+        return RequestDisposition::error(status_for_serial_error(error));
+    }
+    {
+        let mut channel = state.channel();
+        if mask & purge::RX_CLEAR != 0 {
+            channel.plane.clear_incoming(ChannelRole::Application);
+        }
+        if mask & purge::TX_CLEAR != 0 {
+            channel.plane.clear_outgoing(ChannelRole::Application);
+        }
+    }
+    if mask & purge::RX_ABORT != 0 {
+        // SAFETY: This manual queue belongs to the application side of this device.
+        unsafe { drain_pending_reads(state.queue_for(ChannelRole::Application), STATUS_CANCELLED) };
+    }
+    RequestDisposition::success(0)
+}
+
+unsafe fn immediate_char(state: &DeviceState, request: WDFREQUEST) -> RequestDisposition {
+    // SAFETY: The input buffer contains the documented immediate byte.
+    let byte = match unsafe { request_input::<u8>(request) } {
+        Ok(byte) => byte,
+        Err(status) => return RequestDisposition::error(status),
+    };
+    let write_result = state
+        .channel()
+        .plane
+        .write(ChannelRole::Application, &[byte]);
+    match write_result {
+        Ok(_) => {
+            state.serial().signal_transmit_empty();
+            // SAFETY: The daemon read queue belongs to this device.
+            unsafe { service_pending_reads(state, ChannelRole::Daemon) };
+            RequestDisposition::success(0)
         }
         Err(error) => RequestDisposition::error(status_for_error(error)),
     }
@@ -640,7 +1118,7 @@ fn role_from_name(name: &[u16]) -> Option<ChannelRole> {
     let segment = name
         .rsplit(|unit| *unit == u16::from(b'\\') || *unit == u16::from(b'/'))
         .next()?;
-    if utf16_eq_ascii_case(segment, b"application") {
+    if segment.is_empty() || utf16_eq_ascii_case(segment, b"application") {
         Some(ChannelRole::Application)
     } else if utf16_eq_ascii_case(segment, b"daemon") {
         Some(ChannelRole::Daemon)
@@ -773,6 +1251,10 @@ const fn status_for_error(error: DataPlaneError) -> NTSTATUS {
     }
 }
 
+const fn status_for_serial_error(_error: SerialStateError) -> NTSTATUS {
+    STATUS_INVALID_PARAMETER
+}
+
 fn struct_size<T>() -> ULONG {
     u32::try_from(size_of::<T>()).unwrap_or(ULONG::MAX)
 }
@@ -785,6 +1267,15 @@ fn unicode_string(units_with_null: &[u16]) -> UNICODE_STRING {
         Length: u16::try_from(length).unwrap_or(u16::MAX),
         MaximumLength: u16::try_from(maximum_length).unwrap_or(u16::MAX),
         Buffer: units_with_null.as_ptr().cast_mut(),
+    }
+}
+
+fn unicode_string_buffer(buffer: &mut [u16]) -> UNICODE_STRING {
+    UNICODE_STRING {
+        Length: 0,
+        MaximumLength: u16::try_from(buffer.len().saturating_mul(size_of::<u16>()))
+            .unwrap_or(u16::MAX),
+        Buffer: buffer.as_mut_ptr(),
     }
 }
 
@@ -821,6 +1312,7 @@ mod tests {
         let daemon: Vec<u16> = "DAEMON".encode_utf16().collect();
         let unknown: Vec<u16> = "control".encode_utf16().collect();
 
+        assert_eq!(role_from_name(&[]), Some(ChannelRole::Application));
         assert_eq!(role_from_name(&application), Some(ChannelRole::Application));
         assert_eq!(role_from_name(&daemon), Some(ChannelRole::Daemon));
         assert_eq!(role_from_name(&unknown), None);

@@ -130,6 +130,28 @@ impl EndpointDataPlane {
         Ok(self.incoming_mut(role).pop_into(output))
     }
 
+    /// Discard bytes waiting to be read by `role`.
+    pub fn clear_incoming(&mut self, role: ChannelRole) {
+        self.incoming_mut(role).clear();
+    }
+
+    /// Discard bytes written by `role` but not yet read by its peer.
+    pub fn clear_outgoing(&mut self, role: ChannelRole) {
+        self.outgoing_mut(role).clear();
+    }
+
+    /// Return queued bytes waiting for `role`, even while its peer is disconnected.
+    #[must_use]
+    pub fn incoming_len(&self, role: ChannelRole) -> usize {
+        self.incoming(role).len()
+    }
+
+    /// Return bytes written by `role` and waiting for its peer.
+    #[must_use]
+    pub fn outgoing_len(&self, role: ChannelRole) -> usize {
+        self.incoming(role.peer()).len()
+    }
+
     const fn require_open(&self, role: ChannelRole) -> Result<(), DataPlaneError> {
         let open = match role {
             ChannelRole::Application => self.application_open,
@@ -316,5 +338,22 @@ mod tests {
         );
         assert_eq!(plane.open(ChannelRole::Application), Ok(2));
         assert_eq!(plane.available_to_read(ChannelRole::Application), Ok(0));
+    }
+
+    #[test]
+    fn purge_directions_are_independent() {
+        let mut plane = connected(8);
+        plane
+            .write(ChannelRole::Application, b"out")
+            .expect("application write");
+        plane
+            .write(ChannelRole::Daemon, b"in")
+            .expect("daemon write");
+
+        plane.clear_incoming(ChannelRole::Application);
+        assert_eq!(plane.incoming_len(ChannelRole::Application), 0);
+        assert_eq!(plane.outgoing_len(ChannelRole::Application), 3);
+        plane.clear_outgoing(ChannelRole::Application);
+        assert_eq!(plane.outgoing_len(ChannelRole::Application), 0);
     }
 }

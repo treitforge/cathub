@@ -1,13 +1,13 @@
-# CatHub pure Rust UMDF proof of concept
+# CatHub pure Rust UMDF virtual serial driver
 
-This isolated Cargo package proves the first build and ABI boundary for issue #6.
+This isolated Cargo package implements the Windows driver side of issue #6.
 It is not part of the normal CatHub workspace because `windows-drivers-rs` supports one WDK
 configuration per Cargo build graph.
 
-The current driver creates a private proof-of-concept-class WDF device and registers two
-reference-named instances of private interface
-`{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`: `application` and `daemon`.
-It does not register `GUID_DEVINTERFACE_COMPORT` or claim a COM number.
+The current driver installs as a Ports-class WDF device, registers `GUID_DEVINTERFACE_COMPORT`,
+uses the COM number assigned by the Windows Ports class installer, and creates the corresponding
+global `COMx` symbolic link. It also registers the reference-named `daemon` instance of the private
+CatHub interface `{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`.
 Do not install it on the working station.
 
 ## Pinned inputs
@@ -71,7 +71,7 @@ All Windows and WDF calls live in `src/interop.rs`.
 Every exported or registered callback catches Rust panics before they can unwind into WDF.
 The driver contains no kernel-mode CatHub code and no C or C++ shim.
 
-The proof-of-concept data plane currently provides:
+The data plane currently provides:
 
 - one exclusive handle for each reference name;
 - independent 64 KiB bounded queues in both directions;
@@ -80,10 +80,13 @@ The proof-of-concept data plane currently provides:
 - fail-closed cleanup that clears buffered bytes and completes both sides' pending reads when
   either handle disconnects, with new reads and writes rejected until both peers reconnect.
 
+The public COM handle implements the Windows serial controls used by the Phase 1 conformance
+harness, including baud/line settings, timeouts, flow control, special characters, modem lines,
+queue status, purge, immediate characters, and `WaitCommEvent`. Unsupported IOCTLs fail explicitly.
+
 Each WDF device owns its transport state and pending-read queues through typed object context, and
 the context's destroy callback releases the Rust-owned state during device teardown.
 
-This remains a raw-byte proof of concept. It does not yet decode the shared private framing
-contract, implement serial timeouts or controls, restrict the daemon interface to a service SID, or
-expose a real application COM port. The INF stays in the private proof-of-concept class until those
-behaviors are implemented and verified on an isolated driver-development target.
+The private daemon handle remains a raw-byte channel. It does not yet decode the shared framing
+contract or restrict the interface to a service SID. The application COM path and driver package
+must still be installed and verified on the isolated driver-development target.
