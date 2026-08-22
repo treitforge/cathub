@@ -54,16 +54,17 @@ To build and validate an unsigned package without creating a certificate:
 .\scripts\Test-UmdfPoc.ps1 -Action ValidatePackage
 ```
 
-On an isolated driver-development target, produce the upstream test-signed package with:
+Produce a test-signed package for an isolated driver-development target with:
 
 ```powershell
 .\scripts\Test-UmdfPoc.ps1 -Action Package
 ```
 
-The `Package` action generates a certificate in the upstream workflow's private test store and
-uses it to sign the package. It requires `makecert` and `signtool`.
-Building a package does not authorize installing its certificate or driver.
-Keep any test certificate off normal operator machines.
+The `Package` action generates a short-lived code-signing certificate without adding it to the
+host certificate store, signs the package catalog with `signtool`, deletes the private-key file,
+and leaves the public `cathub_umdf_test.cer` in the package for the isolated target. Building a
+package does not authorize installing its certificate or driver. Keep the public test certificate
+off normal operator machines.
 
 ## Current safety boundary
 

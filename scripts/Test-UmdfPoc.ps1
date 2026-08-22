@@ -65,6 +65,26 @@ function Add-PathEntry {
     }
 }
 
+function Find-SignTool {
+    $command = Get-Command signtool -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $kitsBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    if (Test-Path -LiteralPath $kitsBin) {
+        $candidate = Get-ChildItem -LiteralPath $kitsBin -Directory |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'x64\signtool.exe') } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+        if ($candidate) {
+            return Join-Path $candidate.FullName 'x64\signtool.exe'
+        }
+    }
+
+    throw 'Required UMDF build command signtool is not available. Install the Windows SDK signing tools.'
+}
+
 function Initialize-WdkEnvironment {
     $contentRoot = Find-WdkContentRoot
     $versionDirectory = Get-ChildItem -LiteralPath (Join-Path $contentRoot 'Include') -Directory |
@@ -100,6 +120,70 @@ function Invoke-Checked {
     }
 }
 
+function New-EphemeralDriverCertificate {
+    param(
+        [Parameter(Mandatory)][string]$PfxPath,
+        [Parameter(Mandatory)][string]$CerPath,
+        [Parameter(Mandatory)][string]$Password
+    )
+
+    $rsa = [System.Security.Cryptography.RSA]::Create(3072)
+    try {
+        $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+            'CN=CatHub UMDF Test Certificate',
+            $rsa,
+            [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+        )
+        $request.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new(
+                $false, $false, 0, $true
+            )
+        )
+        $request.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
+                [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature,
+                $true
+            )
+        )
+        $usages = [System.Security.Cryptography.OidCollection]::new()
+        $null = $usages.Add([System.Security.Cryptography.Oid]::new(
+                '1.3.6.1.5.5.7.3.3', 'Code Signing'
+            ))
+        $request.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new(
+                $usages, $true
+            )
+        )
+
+        $certificate = $request.CreateSelfSigned(
+            [DateTimeOffset]::UtcNow.AddMinutes(-5),
+            [DateTimeOffset]::UtcNow.AddDays(30)
+        )
+        try {
+            [System.IO.File]::WriteAllBytes(
+                $PfxPath,
+                $certificate.Export(
+                    [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,
+                    $Password
+                )
+            )
+            [System.IO.File]::WriteAllBytes(
+                $CerPath,
+                $certificate.Export(
+                    [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert
+                )
+            )
+        }
+        finally {
+            $certificate.Dispose()
+        }
+    }
+    finally {
+        $rsa.Dispose()
+    }
+}
+
 Assert-Command cargo
 Assert-Command clang
 Initialize-WdkEnvironment
@@ -107,12 +191,37 @@ Initialize-WdkEnvironment
 Push-Location $driverRoot
 try {
     if ($Action -eq 'Package') {
-        foreach ($command in @(
-                'cargo-make', 'inf2cat', 'infverif', 'stampinf', 'makecert', 'signtool'
-            )) {
+        foreach ($command in @('cargo-make', 'inf2cat', 'infverif', 'stampinf')) {
             Assert-Command $command
         }
-        Invoke-Checked cargo @('make', 'default', '--target', 'x86_64-pc-windows-msvc')
+        $signTool = Find-SignTool
+        Invoke-Checked cargo @(
+            'make', 'package-unsigned', '--target', 'x86_64-pc-windows-msvc'
+        )
+
+        $packageRoot = Join-Path $driverRoot `
+            'target\x86_64-pc-windows-msvc\debug\cathub_virtual_serial_umdf_package'
+        $catalogPath = Join-Path $packageRoot 'cathub_virtual_serial_umdf.cat'
+        $certificatePath = Join-Path $packageRoot 'cathub_umdf_test.cer'
+        $pfxPath = Join-Path ([System.IO.Path]::GetTempPath()) `
+            "cathub-umdf-$([guid]::NewGuid().ToString('N')).pfx"
+        $password = [guid]::NewGuid().ToString('N')
+        try {
+            New-EphemeralDriverCertificate `
+                -PfxPath $pfxPath `
+                -CerPath $certificatePath `
+                -Password $password
+            Invoke-Checked $signTool @(
+                'sign', '/v', '/fd', 'SHA256', '/f', $pfxPath, '/p', $password, $catalogPath
+            )
+        }
+        finally {
+            if (Test-Path -LiteralPath $pfxPath) {
+                Remove-Item -LiteralPath $pfxPath -Force
+            }
+        }
+        Write-Host "Signed test package: $packageRoot"
+        Write-Host 'The public test certificate is included for the isolated target only.'
     }
     elseif ($Action -eq 'ValidatePackage') {
         foreach ($command in @('cargo-make', 'inf2cat', 'infverif', 'stampinf')) {
