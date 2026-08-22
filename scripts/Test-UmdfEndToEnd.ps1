@@ -22,7 +22,7 @@ function Invoke-Checked {
     }
 }
 
-function Find-CatHubPort {
+function Find-CatHubDevice {
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
         $device = Get-PnpDevice -Class Ports -PresentOnly -ErrorAction SilentlyContinue |
@@ -31,7 +31,10 @@ function Find-CatHubPort {
         if ($device) {
             $match = [regex]::Match($device.FriendlyName, '\((COM\d+)\)')
             if ($match.Success) {
-                return $match.Groups[1].Value
+                return [pscustomobject]@{
+                    InstanceId = $device.InstanceId
+                    Port = $match.Groups[1].Value
+                }
             }
 
             $enumPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($device.InstanceId)"
@@ -39,7 +42,10 @@ function Find-CatHubPort {
                 $portName = (Get-ItemProperty -LiteralPath $path -Name PortName `
                         -ErrorAction SilentlyContinue).PortName
                 if ($portName -match '^COM\d+$') {
-                    return $portName
+                    return [pscustomobject]@{
+                        InstanceId = $device.InstanceId
+                        Port = $portName
+                    }
                 }
             }
         }
@@ -113,13 +119,15 @@ Invoke-Checked $CatHubExe @(
     '--format', 'json'
 )
 
-$portName = Find-CatHubPort
+$device = Find-CatHubDevice
+$portName = $device.Port
 $process = $null
 $serial = $null
 $results = [ordered]@{
     timestamp_utc = [DateTime]::UtcNow.ToString('o')
     machine = $env:COMPUTERNAME
     port = $portName
+    device_instance_id = $device.InstanceId
     driver_certificate = $certificate.Thumbprint
     cases = @()
 }
@@ -272,6 +280,72 @@ try {
         name = 'daemon_restart_reconnect'
         passed = $true
         response = $restartId
+    }
+
+    Invoke-Checked pnputil @('/restart-device', $device.InstanceId)
+    $serial.ReadTimeout = 1000
+    $deviceFailureTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $deviceFailure = $null
+    try {
+        $serial.Write('ID;')
+        $null = $serial.ReadTo(';')
+    }
+    catch {
+        $deviceFailure = $_.Exception.Message
+    }
+    $deviceFailureTimer.Stop()
+    if (-not $deviceFailure) {
+        throw 'The pre-restart COM handle unexpectedly remained usable after device restart.'
+    }
+    if ($deviceFailureTimer.ElapsedMilliseconds -gt 3000) {
+        throw "Device-restart I/O failure took $($deviceFailureTimer.ElapsedMilliseconds) ms."
+    }
+    $serial.Close()
+    $serial.Dispose()
+    $serial = $null
+
+    $restartedDevice = Find-CatHubDevice
+    if ($restartedDevice.InstanceId -ne $device.InstanceId) {
+        throw "Device restart changed instance ID to '$($restartedDevice.InstanceId)'."
+    }
+
+    $reconnectDeadline = [DateTime]::UtcNow.AddSeconds(20)
+    $deviceRestartId = $null
+    $lastReconnectError = $null
+    do {
+        try {
+            $serial = [System.IO.Ports.SerialPort]::new($portName, 9600)
+            $serial.ReadTimeout = 1000
+            $serial.WriteTimeout = 1000
+            $serial.Open()
+            $deviceRestartId = Invoke-CatQuery -Port $serial -Command 'ID;'
+            if ($deviceRestartId -eq 'ID021;') {
+                break
+            }
+            $lastReconnectError = "unexpected response '$deviceRestartId'"
+        }
+        catch {
+            $lastReconnectError = $_.Exception.Message
+        }
+        if ($serial) {
+            if ($serial.IsOpen) {
+                $serial.Close()
+            }
+            $serial.Dispose()
+            $serial = $null
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $reconnectDeadline)
+
+    if ($deviceRestartId -ne 'ID021;') {
+        throw "CatHub did not reconnect after device restart: $lastReconnectError"
+    }
+    $results.cases += [ordered]@{
+        name = 'umdf_device_restart_reconnect'
+        passed = $true
+        failure_elapsed_ms = $deviceFailureTimer.ElapsedMilliseconds
+        failure_error = $deviceFailure
+        response = $deviceRestartId
     }
     $results.passed = $true
 }
