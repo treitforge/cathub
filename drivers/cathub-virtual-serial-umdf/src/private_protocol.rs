@@ -844,4 +844,30 @@ mod tests {
             .expect("window update");
         assert!(daemon_events(&mut daemon, &[update]).is_empty());
     }
+
+    #[test]
+    fn malformed_daemon_corpus_never_panics_the_driver_state_machine() {
+        let valid_hello = hello(1).encode().expect("hello encoding");
+        for index in 0..valid_hello.len() {
+            for mask in [0x01_u8, 0x80, 0xFF] {
+                let mut mutated = valid_hello.clone();
+                mutated[index] ^= mask;
+                let mut protocol = DriverProtocol::new();
+                let _ = protocol.ingest_daemon(&mutated);
+            }
+        }
+
+        let mut state = 0x55D1_5EA5_EC0D_ED01u64;
+        for length in 0..=2_048 {
+            let mut bytes = vec![0_u8; length];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = state.to_le_bytes()[0];
+            }
+            let mut protocol = DriverProtocol::new();
+            let _ = protocol.ingest_daemon(&bytes);
+        }
+    }
 }
