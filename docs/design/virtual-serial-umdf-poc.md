@@ -40,6 +40,7 @@ Available on the development station:
 - Visual Studio 2026 Build Tools and Visual Studio 2022
 - Windows SDK directories through 10.0.26100.0
 - User-local Microsoft WDK NuGet package 10.0.28000.2526 and SDK dependency 10.0.28000.1721
+- Pinned `windows-drivers-rs` checkout and Microsoft VirtualSerial2 source cache
 - `cargo-make` 0.37.24 and `rust-script` 0.36.0
 - N1MM Logger+ and the existing com0com pairs, which remain untouched for comparison
 
@@ -50,9 +51,10 @@ a short-lived development signature in the DLL before regenerating and signing t
 
 With explicit operator authorization, the development package was provisioned locally as COM91
 without changing or removing any com0com device. Windows staged the package and verified both
-signatures, but normal boot policy rejected the self-signed image with
-`ERROR_INVALID_IMAGE_HASH`. Installed functional validation therefore awaits an explicitly
-authorized Test Signing reboot or a publicly/Microsoft-signed package.
+signatures. Normal boot policy correctly rejected the self-signed image with
+`ERROR_INVALID_IMAGE_HASH`; after the operator explicitly enabled Windows Test Signing and
+rebooted, the exact `f641c2b` package loaded successfully with Memory Integrity running and
+integrity checks enabled. The full installed-driver acceptance described below then passed.
 
 ## Microsoft sample inventory
 
@@ -66,7 +68,7 @@ The source remains upstream; CatHub does not copy the C implementation.
 |---|---|---|
 | Driver | `DriverEntry`, `EVT_WDF_DRIVER_DEVICE_ADD` | Pure Rust entry and device creation implemented |
 | Device | Device context and cleanup callback | Typed per-device context and destroy cleanup implemented |
-| Default queue | Parallel read, write, and device-control callbacks | Sequential read, write, and serial-control queue implemented |
+| Default queue | Parallel read, write, and device-control callbacks | Parallel read, write, and serial-control queue implemented |
 | Pending reads | Manual queue | Two manual queues with cancellation and disconnect draining implemented |
 | Pending event wait | Separate manual queue | One-outstanding-wait manual queue implemented |
 | Cleanup | Device cleanup releases COM mapping | Application/daemon detach drains requests and clears bounded buffers |
@@ -99,7 +101,7 @@ VirtualSerial2 uses the Ports class, `FILE_DEVICE_SERIAL_PORT`, `GUID_DEVINTERFA
 name stored in the device map, and a symbolic link.
 Its Windows 11 INF includes `WUDFRD.inf` and configures a UMDF service hosted through the reflector.
 
-CatHub will add a separate ACL-restricted private device interface and a stable endpoint ID.
+CatHub adds a separate ACL-restricted private device interface and a stable endpoint ID.
 Those are CatHub requirements, not behaviors supplied by VirtualSerial2.
 
 ## Unsafe and FFI inventory
@@ -124,14 +126,26 @@ byte buffers, exclusive-handle state, application session sequence, and pending-
 Each device owns those values through typed WDF context; file and queue callbacks resolve their
 parent device before accessing the state.
 
-## Remaining installed-validation gates
+## Development acceptance and remaining production gates
 
-1. Load the self-signed development image under explicitly authorized Windows Test Signing policy,
-   or obtain a public/Microsoft signature suitable for normal policy.
-2. Confirm the device starts, both interfaces enumerate, and the stable COM mapping survives a
-   clean device restart.
-3. Run every native serial conformance profile through the private CatHub adapter.
-4. Run the `n1mm-radio` sequence in `docs/testing/n1mm-radio-poc.md` and repeat the applicable
-   flows for the other four legacy clients.
-5. Exercise daemon failure, UMDF-host restart, repair, upgrade, rollback, removal, sleep, and resume
-   while preserving fail-safe transmit behavior.
+The exact package for `f641c2b028871b5ce90dc9bfcd912da393c14f76` passed the elevated local
+end-to-end harness on 2026-08-22. The retained device was healthy as COM91 after reboot and after a
+PnP disable/enable cycle. The run verified both interfaces, stable identity, native synchronous
+and overlapped I/O, cancellation, timeouts, purge, `WaitCommEvent`, DCB and modem controls, queue
+status, bounded-buffer rejection and recovery, exclusive open/reopen, .NET `SerialPort`, CatHub
+TS-590 traffic, daemon failure/restart, and reconnect. Every automated compatibility profile
+passed 11 of 11 checks, for 55 of 55 total.
+
+That evidence used Windows Test Signing and the development certificate with Secure Boot disabled
+under an explicit exception. Issue #6 still requires these production gates:
+
+1. Obtain an approved public or Microsoft signing path and run the clean Windows 11 acceptance
+   flow with Secure Boot and Memory Integrity enabled, Test Signing disabled, and no publisher
+   certificate preinstalled.
+2. Capture and document runs from the five actual supported clients: HDSDR/OmniRig, N1MM CAT,
+   ARCP-590, N1MM WinKeyer, and WKTools. The automated profiles validate their expected API shapes
+   but are not substitutes for those application runs.
+3. Exercise sleep/resume, sustained high-rate and cancellation-race stress, and fail-safe PTT and
+   keying behavior through real endpoint lifecycle changes.
+4. Implement and validate installer upgrade, repair, rollback, and uninstall behavior, including
+   subsequent standard-user operation.

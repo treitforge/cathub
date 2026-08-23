@@ -287,7 +287,7 @@ if (-not $isHyperVGuest -and -not $AllowLocalMachine) {
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Run this test from an elevated PowerShell session inside the isolated VM.'
+    throw 'Run this test from an elevated PowerShell session on the authorized development target.'
 }
 
 $infPath = Join-Path $DriverPackage 'cathub_virtual_serial_umdf.inf'
@@ -397,7 +397,7 @@ try {
         -not $results.security.device_guard -or
         2 -notin @($results.security.device_guard.security_services_running)
     ) {
-        throw 'Memory Integrity (HVCI) is not reported as running on the isolated target.'
+        throw 'Memory Integrity (HVCI) is not reported as running on the development target.'
     }
 
     $results.certificate_root_install = Invoke-Captured certutil @(

@@ -9,7 +9,11 @@ uses the COM number assigned by the Windows Ports class installer, and creates t
 global `COMx` symbolic link and `HARDWARE\DEVICEMAP\SERIALCOMM` entry used by legacy enumerators.
 It also registers the reference-named `daemon` instance of the private CatHub interface
 `{0084BDDE-9F40-4A6A-AF84-0F4E46B70901}`.
-Do not install it on the working station.
+
+This remains a development driver, not an operator release. Prefer a dedicated test target.
+Installation on another machine requires explicit operator authorization because it imports a test
+certificate, stages a PnP package, and changes boot-policy requirements. Building or validating
+the package does not authorize installing it.
 
 ## Pinned inputs
 
@@ -106,5 +110,22 @@ kept separate from driver control frames.
 The private daemon path uses UMDF request impersonation. Provisioning stores the invoking Windows
 user SID in the device instance; a daemon create request is accepted only when that SID is a member
 of the impersonated caller token. The public COM path does not use this private authorization check.
-The application COM path, private CatHub adapter, and driver package must still be verified
-together on the isolated driver-development target.
+
+## Development acceptance
+
+On 2026-08-22, with explicit operator authorization, the exact package produced from revision
+`f641c2b028871b5ce90dc9bfcd912da393c14f76` passed the full local installed-driver harness on
+Windows 11 Pro x64 build 26200. It was retained as `CatHub Virtual Serial Port (COM91)` at
+`ROOT\PORTS\0000` using `oem86.inf`, driver version `16.25.49.354`.
+
+The run passed package-integrity and signature checks, Windows serial discovery, .NET
+`SerialPort` finite timeouts, real CatHub TS-590 loopback traffic, 100 repeated bidirectional
+queries, close/reopen, daemon loss and restart, and a UMDF device disable/enable cycle followed by
+reconnection without reboot. All five automated client profiles passed 11 of 11 checks each
+(55 of 55 total): HDSDR/OmniRig, N1MM CAT, ARCP-590, N1MM WinKeyer, and WKTools.
+
+The local evidence is retained in the ignored file `target/cathub-umdf-e2e-final.json`. That run
+used the short-lived CatHub test certificate and Windows Test Signing, with Memory Integrity
+running and integrity checks enabled; Secure Boot was disabled under the harness's explicit
+exception. It proves the development transport works end to end, but it does not satisfy issue
+#6's production clean-system signing gate or replace acceptance with the five actual applications.

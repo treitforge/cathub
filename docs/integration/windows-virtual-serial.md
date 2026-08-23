@@ -96,9 +96,9 @@ research and required acceptance record.
 
 The self-signed development image requires
 [Windows Test Signing mode](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option).
-On a dedicated development target, disable Secure Boot, enable Test Signing, and reboot. Leave
-Memory Integrity enabled; the driver DLL remains signed and the harness rejects disabled integrity
-checks. Then run the harness from an elevated PowerShell session:
+A dedicated development target is preferred. Disable Secure Boot, enable Test Signing, and reboot.
+Leave Memory Integrity enabled; the driver DLL remains signed and the harness rejects disabled
+integrity checks. Then run the harness from an elevated PowerShell session:
 
 ```powershell
 bcdedit.exe -set TESTSIGNING ON
@@ -107,6 +107,19 @@ cd C:\CatHubUmdfTest
 .\Test-UmdfEndToEnd.ps1 `
   -IUnderstandThisInstallsATestDriver `
   -AllowSecureBootDisabled
+```
+
+The harness rejects a non-Hyper-V machine by default. When the operator explicitly authorizes a
+local development installation, also pass `-AllowLocalMachine`. Pass `-KeepInstalled` only when the
+working driver and its current development trust certificate must remain available after the test:
+
+```powershell
+.\scripts\Test-UmdfEndToEnd.ps1 `
+  -IUnderstandThisInstallsATestDriver `
+  -AllowLocalMachine `
+  -AllowSecureBootDisabled `
+  -KeepInstalled `
+  -ResultsPath .\target\cathub-umdf-e2e-final.json
 ```
 
 The harness fails before installation unless Test Signing and Memory Integrity are running,
@@ -122,8 +135,15 @@ handle, exclusive-open/reopen behavior, and both CAT 8-N-1 and WinKeyer 8-N-2 li
 recreating a second COM port.
 After a successful run it removes the endpoint, staged OEM driver package, and
 test certificate and verifies the resulting CatHub inventory. Pass `-KeepInstalled` only when
-retaining that isolated VM state is necessary for debugging; failed runs retain state so the
-original failure can be inspected before reverting the VM checkpoint.
+retaining the development state is intentional; failed runs retain state so the original failure
+can be inspected before cleanup or reverting a VM checkpoint.
+
+The exact `f641c2b` development package completed this local authorized flow on 2026-08-22. COM91
+remained healthy after reboot and a PnP disable/enable cycle, all five automated compatibility
+profiles passed 11 of 11 checks, and the real CatHub loopback path survived daemon loss, restart,
+and reconnect. See the [UMDF proof-of-concept status](../design/virtual-serial-umdf-poc.md) and
+[serial client inventory](../testing/serial-client-inventory.md) for the durable evidence summary
+and remaining production gates.
 
 Normal-policy acceptance is a separate production-signing gate. After CatHub obtains a public or
 Microsoft driver signature, repeat the clean-system procedure with Secure Boot enabled and Test
