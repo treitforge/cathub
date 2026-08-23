@@ -47,6 +47,9 @@ impl Service {
         }
     }
 
+    // Tonic prescribes `Status` as the service error type, so boxing it here would only force
+    // every generated service method to allocate and immediately unbox the same value.
+    #[allow(clippy::result_large_err)]
     async fn client_id(&self, name: &str) -> Result<ClientId, Status> {
         let name = name.trim();
         if name.is_empty() || name.len() > 64 {

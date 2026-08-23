@@ -19,11 +19,11 @@ Do not change a state to `Verified` without a saved JSON report.
 
 | Profile | Client interface | Serial format | Trace state | Driver report state |
 |---|---|---|---|---|
-| `hdsdr-omnirig` | HDSDR through OmniRig, TS-2000 | Client setting | Planned | Planned |
-| `n1mm-radio` | N1MM Logger+ radio CAT, TS-590 | Client setting | Planned | Planned |
-| `arcp-590` | Kenwood ARCP-590 | Client setting | Planned | Planned |
-| `n1mm-winkeyer` | N1MM Logger+ WinKeyer | 1200 8-N-2 | Planned | Planned |
-| `wktools` | WKTools maintenance | 1200 8-N-2 | Planned | Planned |
+| `hdsdr-omnirig` | HDSDR through OmniRig, TS-2000 | Client setting | Planned | Verified |
+| `n1mm-radio` | N1MM Logger+ radio CAT, TS-590 | Client setting | Planned | Verified |
+| `arcp-590` | Kenwood ARCP-590 | Client setting | Planned | Verified |
+| `n1mm-winkeyer` | N1MM Logger+ WinKeyer | 1200 8-N-2 | Planned | Verified |
+| `wktools` | WKTools maintenance | 1200 8-N-2 | Planned | Verified |
 
 ## Initial behavior matrix
 
@@ -41,6 +41,8 @@ Do not change a state to `Verified` without a saved JSON report.
 | Serial configuration | R | R | R | R | R |
 | DTR, RTS, and break control | O | O | O | O | O |
 | Queue status | R | R | R | R | R |
+| Atomic buffer-saturation rejection and recovery | R | R | R | R | R |
+| Exclusive open, close, and reopen | R | R | R | R | R |
 
 ## Trace procedure
 
@@ -65,4 +67,5 @@ Add one row for each application trace or driver report.
 
 | Date | Profile | Environment | Evidence type | File or URL | Result | Notes |
 |---|---|---|---|---|---|---|
-| Not run | All | Not run | Planned | None | Pending | Phase 1 code and profiles exist. Application runs remain. |
+| 2026-08-14 | `n1mm-radio` | Windows development station | Readiness check | [N1MM PoC runbook](n1mm-radio-poc.md) | Blocked | N1MM and the station CatHub process held COM21/COM20. The alternate pair was also in use. No trace was captured and no evidence state changed. |
+| 2026-08-22 | All five profiles | Windows 11 Pro x64 build 26200, local development target | Installed-driver conformance report | `target/cathub-umdf-e2e-final.json` (local ignored evidence), PR #13 summary | Passed | Exact `f641c2b` package; 11/11 per profile and 55/55 total through COM91 and the private CHVS channel. Test Signing was enabled, Memory Integrity was running, integrity checks were enabled, and Secure Boot was disabled under an explicit development exception. Actual application traces remain planned. |

@@ -66,6 +66,19 @@ pub(crate) async fn run_serial_endpoint<T>(
     run_endpoint_session_inner(transport, broker, client_id, primary, permissions, true).await;
 }
 
+/// Serve a managed UMDF endpoint where a zero-byte read indicates a disconnected application.
+pub(crate) async fn run_managed_endpoint<T>(
+    transport: T,
+    broker: BrokerHandle,
+    client_id: ClientId,
+    primary: bool,
+    permissions: EndpointPermissions,
+) where
+    T: AsyncRead + AsyncWrite + Send + 'static,
+{
+    run_endpoint_session_inner(transport, broker, client_id, primary, permissions, false).await;
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_endpoint_session_inner<T>(
     transport: T,

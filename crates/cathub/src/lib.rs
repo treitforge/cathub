@@ -25,6 +25,7 @@ mod error;
 mod events;
 mod hamlib_net;
 mod logging;
+mod managed_virtual_serial;
 mod model;
 mod permissions;
 mod ptt;
@@ -32,6 +33,7 @@ mod radio;
 mod runtime_info;
 mod serial_endpoint;
 mod state;
+mod virtual_serial_provisioning;
 mod winkeyer;
 
 #[cfg(test)]
@@ -43,7 +45,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(windows)]
+use cathub_virtual_serial::TEST_PEER_READY;
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(windows)]
+use tokio::io::AsyncWriteExt;
+#[cfg(windows)]
+use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -69,6 +77,7 @@ use crate::serial_endpoint::{open_serial, run_endpoint_session};
 use crate::state::StateHandle;
 use crate::winkeyer::{
     bind_server as bind_winkeyer_server, open_serial_endpoint as open_winkeyer_endpoint,
+    run_managed_endpoint as run_managed_winkeyer_endpoint,
     run_serial_endpoint as run_winkeyer_endpoint, spawn_supervised as spawn_winkeyer,
     BrokerHandle as WinkeyerBrokerHandle, EndpointPermissions as WinkeyerEndpointPermissions,
 };
@@ -130,6 +139,78 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Inspect or provision CatHub-owned Windows virtual COM endpoints.
+    VirtualSerial {
+        /// Virtual serial operation to perform.
+        #[command(subcommand)]
+        command: VirtualSerialCommand,
+    },
+}
+
+/// CatHub-owned Windows virtual serial operations.
+#[derive(Debug, Subcommand)]
+pub enum VirtualSerialCommand {
+    /// Report CatHub-owned PnP devices and COM claims without changing the system.
+    Status {
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Compare configured managed endpoints with PnP and COM Name Arbiter state.
+    Plan {
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Reconcile configured managed endpoints using a signed CatHub driver package.
+    Apply {
+        /// Full path to the CatHub UMDF driver INF.
+        #[arg(long, value_name = "FILE")]
+        inf: PathBuf,
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Remove CatHub-owned endpoint devices, never third-party or physical ports.
+    Remove {
+        /// Stable endpoint ID to remove; repeat to select several. Omit to remove all.
+        #[arg(long = "endpoint", value_name = "STABLE_ID")]
+        endpoints: Vec<String>,
+        /// Select text or machine-readable JSON output.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+    },
+    /// Expose the private managed transport over loopback TCP for the serial conformance harness.
+    #[command(hide = true)]
+    TestPeer {
+        /// Stable endpoint ID to attach to.
+        #[arg(long, default_value = "cathub-default")]
+        endpoint: String,
+        /// Provisioned endpoint kind.
+        #[arg(long, value_enum, default_value_t = ManagedEndpointKind::Cat)]
+        kind: ManagedEndpointKind,
+        /// Loopback address used by the conformance process.
+        #[arg(long, default_value = "127.0.0.1:39116")]
+        listen: SocketAddr,
+    },
+}
+
+/// Test-only managed endpoint kind used by the serial conformance bridge.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ManagedEndpointKind {
+    /// CAT radio endpoint.
+    Cat,
+    /// WinKeyer endpoint.
+    Winkeyer,
+}
+
+impl ManagedEndpointKind {
+    const fn code(self) -> u16 {
+        match self {
+            Self::Cat => 1,
+            Self::Winkeyer => 2,
+        }
+    }
 }
 
 /// CatHub configuration commands.
@@ -250,6 +331,7 @@ async fn open_radio_tcp(radio: &RadioConfig) -> std::io::Result<TcpStream> {
 pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     if let Some(command) = cli.command {
         return run_command(command, cli.config, cli.section.as_deref())
+            .await
             .map_err(CatHubError::Config);
     }
     let path = cli
@@ -420,48 +502,108 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     if let Some(keyer) = &winkeyer {
         for endpoint in &cfg.winkeyer_endpoint {
             let id = next_id.fetch_add(1, Ordering::SeqCst);
-            let port = open_winkeyer_endpoint(&endpoint.transport, endpoint.baud)?;
             let handle = keyer.clone();
             let primary = endpoint.primary;
             let permissions = WinkeyerEndpointPermissions::from_tokens(&endpoint.perms);
-            tokio::spawn(run_winkeyer_endpoint(
-                port,
-                handle,
-                id,
-                primary,
-                permissions,
-            ));
-            tracing::info!(
-                endpoint = %endpoint.name,
-                id,
-                hub_port = %endpoint.transport,
-                primary,
-                "virtual WinKeyer endpoint listening; point the application at the paired port"
-            );
+            if let Some(stable_id) = endpoint.virtual_endpoint.clone() {
+                let name = endpoint.name.clone();
+                tracing::info!(endpoint = %name, id, %stable_id, primary, "managed WinKeyer endpoint listening");
+                tokio::spawn(async move {
+                    loop {
+                        match managed_virtual_serial::open(&stable_id, 2).await {
+                            Ok(transport) => {
+                                tracing::info!(endpoint = %name, id, %stable_id, "managed WinKeyer application connected");
+                                run_managed_winkeyer_endpoint(
+                                    transport,
+                                    handle.clone(),
+                                    id,
+                                    primary,
+                                    permissions,
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                tracing::warn!(endpoint = %name, %stable_id, %error, "managed WinKeyer endpoint unavailable; retrying");
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                });
+            } else {
+                let port = open_winkeyer_endpoint(&endpoint.transport, endpoint.baud)?;
+                tokio::spawn(run_winkeyer_endpoint(
+                    port,
+                    handle,
+                    id,
+                    primary,
+                    permissions,
+                ));
+                tracing::info!(
+                    endpoint = %endpoint.name,
+                    id,
+                    hub_port = %endpoint.transport,
+                    primary,
+                    "virtual WinKeyer endpoint listening; point the application at the paired port"
+                );
+            }
         }
     }
 
     for endpoint in &cfg.serial_endpoint {
         let dialect = dialect_for(&endpoint.dialect)?;
         let id = next_id.fetch_add(1, Ordering::SeqCst);
-        let ctx = ClientSessionContext::new(
-            id,
-            endpoint.permissions(),
-            state.clone(),
-            radio.clone(),
-            ptt.clone(),
-            caps.clone(),
-        )
-        .with_single_vfo(endpoint.single_vfo);
-        let port = open_serial(&endpoint.name, &endpoint.transport, endpoint.baud)?;
-        tokio::spawn(run_endpoint_session(port, dialect, ctx, b';'));
-        tracing::info!(
-            endpoint = %endpoint.name,
-            id,
-            hub_port = %endpoint.transport,
-            "serial endpoint listening; hub owns this port -- point the application at the paired \
-             com0com port, not this one"
-        );
+        if let Some(stable_id) = endpoint.virtual_endpoint.clone() {
+            let name = endpoint.name.clone();
+            tracing::info!(endpoint = %name, id, %stable_id, "managed CAT endpoint listening");
+            let permissions = endpoint.permissions();
+            let single_vfo = endpoint.single_vfo;
+            let state = state.clone();
+            let radio = radio.clone();
+            let ptt = ptt.clone();
+            let caps = caps.clone();
+            tokio::spawn(async move {
+                loop {
+                    match managed_virtual_serial::open(&stable_id, 1).await {
+                        Ok(transport) => {
+                            tracing::info!(endpoint = %name, id, %stable_id, "managed CAT application connected");
+                            let ctx = ClientSessionContext::new(
+                                id,
+                                permissions,
+                                state.clone(),
+                                radio.clone(),
+                                ptt.clone(),
+                                caps.clone(),
+                            )
+                            .with_single_vfo(single_vfo);
+                            run_endpoint_session(transport, dialect.clone(), ctx, b';').await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(endpoint = %name, %stable_id, %error, "managed CAT endpoint unavailable; retrying");
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            });
+        } else {
+            let ctx = ClientSessionContext::new(
+                id,
+                endpoint.permissions(),
+                state.clone(),
+                radio.clone(),
+                ptt.clone(),
+                caps.clone(),
+            )
+            .with_single_vfo(endpoint.single_vfo);
+            let port = open_serial(&endpoint.name, &endpoint.transport, endpoint.baud)?;
+            tokio::spawn(run_endpoint_session(port, dialect, ctx, b';'));
+            tracing::info!(
+                endpoint = %endpoint.name,
+                id,
+                hub_port = %endpoint.transport,
+                "serial endpoint listening; hub owns this port -- point the application at the paired \
+                 com0com port, not this one"
+            );
+        }
     }
 
     let mut hamlib_endpoints = Vec::with_capacity(cfg.hamlib_net.len());
@@ -560,7 +702,7 @@ pub async fn run(cli: Cli) -> Result<(), CatHubError> {
     Ok(())
 }
 
-fn run_command(
+async fn run_command(
     command: Command,
     config_path: Option<PathBuf>,
     section: Option<&str>,
@@ -621,7 +763,110 @@ fn run_command(
                 Ok(())
             }
         },
+        Command::VirtualSerial { command } => {
+            run_virtual_serial_command(command, config_path.as_deref(), section).await
+        }
     }
+}
+
+async fn run_virtual_serial_command(
+    command: VirtualSerialCommand,
+    config_path: Option<&std::path::Path>,
+    section: Option<&str>,
+) -> Result<(), error::ConfigError> {
+    use virtual_serial_provisioning as provisioning;
+
+    fn print_report<T: serde::Serialize + provisioning::TextReport>(
+        report: &T,
+        format: OutputFormat,
+    ) -> Result<(), error::ConfigError> {
+        match format {
+            OutputFormat::Text => println!("{}", report.render_text()),
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::to_string_pretty(report).map_err(|error| {
+                    error::ConfigError::Invalid(format!(
+                        "serializing virtual serial report: {error}"
+                    ))
+                })?
+            ),
+        }
+        Ok(())
+    }
+
+    let load_config = || {
+        let path = config_path.map_or_else(Config::default_config_path, PathBuf::from);
+        Config::load_selected(&path, section)
+    };
+    match command {
+        VirtualSerialCommand::Status { format } => {
+            let report = provisioning::status().map_err(error::ConfigError::Invalid)?;
+            print_report(&report, format)
+        }
+        VirtualSerialCommand::Plan { format } => {
+            let report =
+                provisioning::plan(&load_config()?).map_err(error::ConfigError::Invalid)?;
+            print_report(&report, format)
+        }
+        VirtualSerialCommand::Apply { inf, format } => {
+            let report =
+                provisioning::apply(&load_config()?, &inf).map_err(error::ConfigError::Invalid)?;
+            print_report(&report, format)
+        }
+        VirtualSerialCommand::Remove { endpoints, format } => {
+            let report = provisioning::remove(&endpoints).map_err(error::ConfigError::Invalid)?;
+            print_report(&report, format)
+        }
+        VirtualSerialCommand::TestPeer {
+            endpoint,
+            kind,
+            listen,
+        } => run_managed_test_peer(&endpoint, kind.code(), listen).await,
+    }
+}
+
+#[cfg(windows)]
+async fn run_managed_test_peer(
+    stable_id: &str,
+    expected_kind: u16,
+    listen: SocketAddr,
+) -> Result<(), error::ConfigError> {
+    if !listen.ip().is_loopback() {
+        return Err(error::ConfigError::Invalid(
+            "managed serial test peer must listen on a loopback address".to_string(),
+        ));
+    }
+    let listener = TcpListener::bind(listen).await?;
+    println!(
+        "managed virtual serial test peer listening on {}",
+        listener.local_addr()?
+    );
+
+    loop {
+        let (mut socket, peer) = listener.accept().await?;
+        tracing::debug!(%peer, %stable_id, "serial conformance peer connected");
+        let mut managed = managed_virtual_serial::open(stable_id, expected_kind)
+            .await
+            .map_err(error::ConfigError::Io)?;
+        if let Err(error) = socket.write_all(TEST_PEER_READY).await {
+            tracing::warn!(%peer, %error, "serial conformance readiness write failed");
+            continue;
+        }
+        if let Err(error) = tokio::io::copy_bidirectional(&mut socket, &mut managed).await {
+            tracing::warn!(%peer, %error, "serial conformance peer bridge failed");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn run_managed_test_peer(
+    _stable_id: &str,
+    _expected_kind: u16,
+    _listen: SocketAddr,
+) -> std::future::Ready<Result<(), error::ConfigError>> {
+    std::future::ready(Err(error::ConfigError::Invalid(
+        "managed virtual serial test peer requires Windows".to_string(),
+    )))
 }
 
 /// Open the physical WinKeyer using the protocol-mandated 8-N-2 framing.

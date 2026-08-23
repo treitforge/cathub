@@ -16,6 +16,11 @@ const BASE_CAT: &[ProfileCase] = &[
     ),
     optional(CaseId::ModemControl, "client trace required"),
     required(CaseId::QueueStatus, "CatHub issue #6 acceptance scope"),
+    required(
+        CaseId::BufferSaturation,
+        "CatHub issue #6 bounded-buffer safety scope",
+    ),
+    required(CaseId::ExclusiveOpen, "CatHub issue #6 acceptance scope"),
 ];
 
 const WINKYER: &[ProfileCase] = &[
@@ -34,6 +39,11 @@ const WINKYER: &[ProfileCase] = &[
     ),
     optional(CaseId::ModemControl, "client trace required"),
     required(CaseId::QueueStatus, "CatHub issue #6 acceptance scope"),
+    required(
+        CaseId::BufferSaturation,
+        "CatHub issue #6 bounded-buffer safety scope",
+    ),
+    required(CaseId::ExclusiveOpen, "CatHub issue #6 acceptance scope"),
 ];
 
 const PROFILES: &[ApplicationProfile] = &[

@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+    # Transitive build-time dependency of the pinned Microsoft windows-drivers-rs revision.
+    # RUSTSEC reports it as unmaintained, not vulnerable, and provides no safe upgrade.
+    { id = "RUSTSEC-2024-0436", reason = "Pinned windows-drivers-rs build dependency; remove when Microsoft replaces paste upstream" },
+]
+
+[sources]
+allow-git = ["https://github.com/microsoft/windows-drivers-rs"]

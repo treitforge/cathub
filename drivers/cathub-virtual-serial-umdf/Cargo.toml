@@ -1,0 +1,47 @@
+[package]
+name = "cathub-virtual-serial-umdf"
+description = "Pure Rust UMDF 2 proof of concept for CatHub virtual serial endpoints"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.91.0"
+license = "MIT"
+repository = "https://github.com/treitforge/cathub"
+publish = false
+resolver = "3"
+
+[package.metadata.wdk.driver-model]
+driver-type = "UMDF"
+umdf-version-major = 2
+target-umdf-version-minor = 33
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+wdk-build = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
+
+[dependencies]
+cathub-virtual-serial = { path = "../../crates/cathub-virtual-serial", default-features = false }
+wdk = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
+wdk-sys = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security"] }
+
+[dev-dependencies]
+wdk-sys = { features = ["test-stubs"], git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+multiple_unsafe_ops_per_block = "forbid"
+multiple_crate_versions = "allow"
+undocumented_unsafe_blocks = "forbid"
+unnecessary_safety_doc = "forbid"
+
+[profile.release]
+lto = true

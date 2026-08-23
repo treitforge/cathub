@@ -2,7 +2,7 @@
 
 This guide configures one CatHub process to own a radio and optional WinKeyer while several
 applications connect through dedicated endpoints. The examples use Windows, a Kenwood
-TS-590, com0com virtual serial pairs, and common amateur-radio applications. Substitute the
+TS-590, CatHub-owned virtual COM endpoints, and common amateur-radio applications. Substitute the
 ports and clients used by your station.
 
 ## 1. Install CatHub
@@ -55,34 +55,31 @@ Remove startup tasks that can start an old bridge.
 
 Do not proceed until the physical ports are free.
 
-## 3. Create virtual serial pairs
+## 3. Choose serial endpoints
 
-Applications that require a COM port need one dedicated null-modem pair each. CatHub opens
-one side and the application opens the other. Hamlib NET and typed gRPC clients use TCP and
-do not need a pair.
+On Windows 11, applications that require a COM port should use one CatHub-owned UMDF endpoint
+each. CatHub attaches through a private device interface, so only the application-facing port is
+visible and no null-modem peer is required. Hamlib NET and typed gRPC clients remain driver-free.
 
-Example com0com pairs:
-
-```text
-COM10 <-> COM11    SDR software through OmniRig
-COM20 <-> COM21    contest logger radio CAT
-COM30 <-> COM31    manufacturer control panel
-COM40 <-> COM41    contest logger WinKeyer
-COM42 <-> COM43    WinKeyer maintenance tool
-```
-
-With com0com's `setupc` utility:
+The sample configuration requests:
 
 ```text
-install PortName=COM10 PortName=COM11
-install PortName=COM20 PortName=COM21
-install PortName=COM30 PortName=COM31
-install PortName=COM40 PortName=COM41
-install PortName=COM42 PortName=COM43
+COM11    SDR software through OmniRig
+COM21    contest logger radio CAT
+COM31    manufacturer control panel
+COM41    contest logger WinKeyer
+COM43    WinKeyer maintenance tool
 ```
 
-The lower, even port in this example is CatHub's `transport`. The other port is
-`application_transport`. Never point an application at CatHub's side of the pair.
+Do not create these ports manually. Configure their stable endpoint IDs in `cathub.toml`, then use
+the plan/apply commands after validation. CatHub refuses to delete or repurpose an existing
+physical, com0com, or third-party virtual device. See
+[CatHub-owned Windows virtual serial endpoints](windows-virtual-serial.md) for package, signing,
+and migration details.
+
+Physical ports and externally provisioned virtual pairs remain supported. For those endpoints,
+keep using `transport` for the path CatHub opens and `application_transport` for the paired path
+the client opens. Do not set `virtual_endpoint` on an externally managed pair.
 
 On Linux, use stable PTY or virtual-serial endpoints managed by the host. Ensure the CatHub
 service account can open the radio, keyer, and hub-side paths.
@@ -141,6 +138,19 @@ cargo run -p cathub -- config print-effective --config config\cathub.toml
 ```
 
 Correct every validation error before starting the daemon.
+
+On Windows, inspect and provision the configured CatHub-owned endpoints from an elevated terminal
+using the signed driver package shipped with the matching CatHub build:
+
+```powershell
+cathub virtual-serial status
+cathub virtual-serial plan
+cathub virtual-serial apply `
+  --inf C:\ProgramData\CatHub\driver\cathub_virtual_serial_umdf.inf
+```
+
+Run `plan` again after `apply`; every requested endpoint should be retained with its expected COM
+name and authorized owner. Normal CatHub operation and client use do not require elevation.
 
 ## 6. Start and inspect CatHub
 
@@ -255,7 +265,7 @@ Then do these tests:
 |---|---|
 | Physical port is busy | Stop every direct radio/keyer client and old bridge. CatHub must be the only physical owner. |
 | Radio opens but does not answer | Match `[radio].baud` to the radio menu and verify the physical port. |
-| Serial client cannot open a port | The client must open `application_transport`, not CatHub's `transport`. |
+| Serial client cannot open a port | For a managed endpoint, check `cathub virtual-serial status`; for an external pair, the client must open `application_transport`, not CatHub's `transport`. |
 | Hamlib NET client cannot connect | Confirm the listener address, firewall policy, and that CatHub completed startup. |
 | Writes return not supported | Check endpoint permissions and whether the command is modeled for that dialect. |
 | Digital mode stops on VFO B | Enable `single_vfo` for that client and use fake split. |

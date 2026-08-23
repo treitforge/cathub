@@ -786,4 +786,52 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn deterministic_arbitrary_byte_corpus_never_panics_the_decoders() {
+        let mut state = 0xC4A7_4B55_D15C_A11Eu64;
+        for length in 0..=2_048 {
+            let mut bytes = vec![0_u8; length];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = state.to_le_bytes()[0];
+            }
+
+            let _ = Frame::decode(&bytes);
+            let mut decoder = FrameDecoder::default();
+            for chunk in bytes.chunks(1 + (length % 31)) {
+                decoder.push(chunk);
+                while let Ok(Some(_)) = decoder.next_frame() {}
+            }
+            assert!(decoder.buffered_len() <= bytes.len());
+        }
+    }
+
+    #[test]
+    fn every_single_byte_frame_mutation_is_rejected_or_round_trips() {
+        let mut frame = Frame::new(MessageKind::Data, 1, 7);
+        frame
+            .fields
+            .insert_u64(data_field::SEQUENCE, 1)
+            .expect("sequence");
+        frame
+            .fields
+            .insert(data_field::BYTES, b"ID;")
+            .expect("bytes");
+        let encoded = frame.encode().expect("encode");
+
+        for index in 0..encoded.len() {
+            for mask in [0x01_u8, 0x80, 0xFF] {
+                let mut mutated = encoded.clone();
+                mutated[index] ^= mask;
+                if let Ok(decoded) = Frame::decode(&mutated) {
+                    let reparsed =
+                        Frame::decode(&decoded.encode().expect("re-encode")).expect("re-decode");
+                    assert_eq!(reparsed, decoded);
+                }
+            }
+        }
+    }
 }

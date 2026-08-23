@@ -5,6 +5,7 @@ mod profiles;
 #[cfg(windows)]
 mod windows;
 
+use std::net::SocketAddr;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,10 @@ pub enum CaseId {
     ModemControl,
     /// Queue counters and error status through `ClearCommError`.
     QueueStatus,
+    /// Bounded-buffer overflow fails atomically and leaves the handle usable.
+    BufferSaturation,
+    /// The COM device allows one application handle and reopens after close.
+    ExclusiveOpen,
 }
 
 impl CaseId {
@@ -50,6 +55,8 @@ impl CaseId {
             Self::SerialConfiguration => "serial_configuration",
             Self::ModemControl => "modem_control",
             Self::QueueStatus => "queue_status",
+            Self::BufferSaturation => "buffer_saturation",
+            Self::ExclusiveOpen => "exclusive_open",
         }
     }
 }
@@ -175,12 +182,46 @@ pub fn run(
 
     #[cfg(windows)]
     {
-        windows::run(profile, application_port, peer_port)
+        windows::run_serial_pair(profile, application_port, peer_port)
     }
 
     #[cfg(not(windows))]
     {
         let _ = (profile, application_port, peer_port);
+        Err(ConformanceError::UnsupportedPlatform)
+    }
+}
+
+/// Run one profile against a CatHub-managed endpoint whose private peer is exposed over TCP.
+///
+/// The TCP bridge is a test-only stand-in for `cathub.exe`'s private UMDF adapter. The
+/// application-facing side remains the real Windows COM device and exercises the same native
+/// serial APIs as the two-port harness.
+///
+/// # Errors
+///
+/// Returns an error if the profile is unknown, the COM port or peer cannot open, or the host is
+/// not Windows.
+pub fn run_with_tcp_peer(
+    profile_name: &str,
+    application_port: &str,
+    peer_address: SocketAddr,
+) -> Result<ConformanceReport, ConformanceError> {
+    let profile = find_profile(profile_name)
+        .ok_or_else(|| ConformanceError::UnknownProfile(profile_name.to_string()))?;
+
+    #[cfg(windows)]
+    {
+        Ok(windows::run_tcp_peer(
+            profile,
+            application_port,
+            peer_address,
+        ))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (profile, application_port, peer_address);
         Err(ConformanceError::UnsupportedPlatform)
     }
 }

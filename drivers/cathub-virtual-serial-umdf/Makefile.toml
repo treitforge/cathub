@@ -1,0 +1,20 @@
+extend = "target/rust-driver-makefile.toml"
+
+[config]
+min_version = "0.37.16"
+
+load_script = '''
+#!@rust
+//! ```cargo
+//! [dependencies]
+//! wdk-build = { git = "https://github.com/microsoft/windows-drivers-rs", rev = "8e88dd899d9fa988df841e08cc01e9f663e5a415" }
+//! ```
+#![allow(unused_doc_comments)]
+
+wdk_build::cargo_make::load_rust_driver_makefile()?
+'''
+
+[tasks.package-unsigned]
+description = "Build and validate an unsigned driver package without creating a certificate"
+dependencies = ["copy-pdb-to-package", "copy-map-to-package", "inf2cat", "infverif"]
+workspace = false

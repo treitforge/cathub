@@ -132,8 +132,9 @@ Clients must validate that process ID before they use the endpoint.
 ## Client interfaces
 
 - Hamlib-aware clients connect to a configured `[[hamlib_net]]` TCP listener.
-- Serial CAT clients connect to the application side of a dedicated virtual serial pair.
-- Legacy WinKeyer clients connect to their own virtual serial pair.
+- On Windows, serial CAT clients can connect to a single CatHub-owned UMDF COM endpoint; existing
+  physical and externally provisioned serial transports remain supported.
+- Legacy WinKeyer clients can use their own CatHub-owned UMDF COM endpoint.
 - Typed WinKeyer clients connect to the loopback gRPC address in `[winkeyer].api_bind`.
 
 A launcher-managed client uses the endpoint in CatHub's runtime file.
@@ -165,6 +166,8 @@ Registry publication is a separate authorized operation. See
 - [Virtual serial Phase 1](docs/design/virtual-serial-transport-phase-1.md)
 - [Serial client inventory](docs/testing/serial-client-inventory.md)
 - [Operator setup](docs/integration/setup.md)
+- [Windows CatHub-owned virtual serial](docs/integration/windows-virtual-serial.md)
+- [Virtual serial signing decision](docs/design/virtual-serial-signing-decision.md)
 - [Release and compatibility](docs/architecture/release-and-compatibility.md)
 
 ## License

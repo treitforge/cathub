@@ -1,14 +1,17 @@
 #![allow(unsafe_code, clippy::borrow_as_ptr)]
 
+use std::io::{ErrorKind, Read, Write};
 use std::mem::{size_of, zeroed};
+use std::net::{SocketAddr, TcpStream};
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Devices::Communication::{
-    BuildCommDCBW, ClearCommBreak, ClearCommError, EscapeCommFunction, GetCommState,
-    GetCommTimeouts, PurgeComm, SetCommBreak, SetCommMask, SetCommState, SetCommTimeouts,
-    WaitCommEvent, CLRDTR, CLRRTS, COMMTIMEOUTS, COMSTAT, DCB, EV_RXCHAR, NOPARITY, ONESTOPBIT,
-    PURGE_RXABORT, PURGE_RXCLEAR, SETDTR, SETRTS, TWOSTOPBITS,
+    ClearCommBreak, ClearCommError, EscapeCommFunction, GetCommMask, GetCommModemStatus,
+    GetCommProperties, GetCommState, GetCommTimeouts, PurgeComm, SetCommBreak, SetCommMask,
+    SetCommState, SetCommTimeouts, WaitCommEvent, CLRDTR, CLRRTS, COMMPROP, COMMTIMEOUTS, COMSTAT,
+    DCB, EV_RXCHAR, NOPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR, PURGE_TXABORT,
+    PURGE_TXCLEAR, SETDTR, SETRTS, TWOSTOPBITS,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GENERIC_READ,
@@ -24,11 +27,40 @@ use super::{
     ApplicationProfile, CaseId, CaseResult, CaseStatus, ConformanceError, ConformanceReport,
     ProfileCase,
 };
+use crate::TEST_PEER_READY;
 
 const IO_WAIT_MS: u32 = 2_000;
 const TEST_DATA: &[u8] = b"CatHub serial conformance";
+const DRIVER_BUFFER_CAPACITY: usize = 64 * 1024;
+const DCB_FLOW_CONTROL_MASK: u32 = (1 << 2)
+    | (1 << 3)
+    | (3 << 4)
+    | (1 << 6)
+    | (1 << 7)
+    | (1 << 8)
+    | (1 << 9)
+    | (1 << 10)
+    | (1 << 11)
+    | (3 << 12)
+    | (1 << 14);
+const DESIRED_DCB_FLAGS: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 8) | (1 << 9) | (2 << 12);
 
-pub(super) fn run(
+#[derive(Clone, Copy)]
+enum PeerTarget<'a> {
+    Serial(&'a str),
+    Tcp(SocketAddr),
+}
+
+impl PeerTarget<'_> {
+    fn report_name(self) -> String {
+        match self {
+            Self::Serial(port) => port.to_string(),
+            Self::Tcp(address) => format!("tcp://{address}"),
+        }
+    }
+}
+
+pub(super) fn run_serial_pair(
     profile: &ApplicationProfile,
     application_port: &str,
     peer_port: &str,
@@ -38,44 +70,67 @@ pub(super) fn run(
             "application and peer ports must be different".to_string(),
         ));
     }
+    Ok(run(
+        profile,
+        application_port,
+        PeerTarget::Serial(peer_port),
+    ))
+}
+
+pub(super) fn run_tcp_peer(
+    profile: &ApplicationProfile,
+    application_port: &str,
+    peer_address: SocketAddr,
+) -> ConformanceReport {
+    run(profile, application_port, PeerTarget::Tcp(peer_address))
+}
+
+fn run(
+    profile: &ApplicationProfile,
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> ConformanceReport {
+    let peer_name = peer_target.report_name();
 
     let results = profile
         .cases
         .iter()
-        .map(|case| run_case(*case, profile, application_port, peer_port))
+        .map(|case| run_case(*case, profile, application_port, peer_target))
         .collect();
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    Ok(ConformanceReport {
+    ConformanceReport {
         schema_version: 1,
         generated_at_utc: format!("unix:{seconds}"),
         profile: profile.name.to_string(),
         application_port: application_port.to_string(),
-        peer_port: peer_port.to_string(),
+        peer_port: peer_name,
         operating_system: "Windows".to_string(),
         results,
-    })
+    }
 }
 
 fn run_case(
     profile_case: ProfileCase,
     profile: &ApplicationProfile,
     application_port: &str,
-    peer_port: &str,
+    peer_target: PeerTarget<'_>,
 ) -> CaseResult {
     let result = match profile_case.id {
-        CaseId::SynchronousIo => synchronous_io(application_port, peer_port),
-        CaseId::OverlappedIo => overlapped_io(application_port, peer_port),
+        CaseId::SynchronousIo => synchronous_io(application_port, peer_target),
+        CaseId::OverlappedIo => overlapped_io(application_port, peer_target),
         CaseId::CancelPendingRead => cancel_pending_read(application_port),
         CaseId::ReadTimeout => read_timeout(application_port),
-        CaseId::PurgeReceive => purge_receive(application_port, peer_port),
-        CaseId::WaitCommEvent => wait_comm_event(application_port, peer_port),
+        CaseId::PurgeReceive => purge_receive(application_port, peer_target),
+        CaseId::WaitCommEvent => wait_comm_event(application_port, peer_target),
         CaseId::SerialConfiguration => serial_configuration(application_port, profile),
         CaseId::ModemControl => modem_control(application_port),
-        CaseId::QueueStatus => queue_status(application_port, peer_port),
+        CaseId::QueueStatus => queue_status(application_port, peer_target),
+        CaseId::BufferSaturation => buffer_saturation(application_port, peer_target),
+        CaseId::ExclusiveOpen => exclusive_open(application_port),
     };
 
     match result {
@@ -99,33 +154,40 @@ fn run_case(
     }
 }
 
-fn synchronous_io(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn synchronous_io(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, false)?;
-    let peer = Port::open(peer_port, false)?;
+    let mut peer = Peer::open(peer_target)?;
     set_timeout(application.handle(), 500)?;
-    set_timeout(peer.handle(), 500)?;
+    peer.set_timeout(Duration::from_millis(500))?;
 
     write_sync(application.handle(), TEST_DATA)?;
-    let received = read_sync(peer.handle(), TEST_DATA.len())?;
+    let received = peer.read_exact(TEST_DATA.len())?;
     require_equal("synchronous application write", &received, TEST_DATA)?;
 
     let reply = b"CatHub synchronous reply";
-    write_sync(peer.handle(), reply)?;
+    peer.write_all(reply)?;
     let received = read_sync(application.handle(), reply.len())?;
     require_equal("synchronous application read", &received, reply)?;
     Ok("blocking reads and writes transferred bytes in both directions".to_string())
 }
 
-fn overlapped_io(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn overlapped_io(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, true)?;
-    let peer = Port::open(peer_port, true)?;
+    let mut peer = Peer::open(peer_target)?;
+    peer.set_timeout(Duration::from_millis(IO_WAIT_MS.into()))?;
 
     write_overlapped(application.handle(), TEST_DATA)?;
-    let received = read_overlapped(peer.handle(), TEST_DATA.len())?;
+    let received = peer.read_exact(TEST_DATA.len())?;
     require_equal("overlapped application write", &received, TEST_DATA)?;
 
     let reply = b"CatHub overlapped reply";
-    write_overlapped(peer.handle(), reply)?;
+    peer.write_all(reply)?;
     let received = read_overlapped(application.handle(), reply.len())?;
     require_equal("overlapped application read", &received, reply)?;
     Ok("overlapped reads and writes transferred bytes in both directions".to_string())
@@ -133,6 +195,9 @@ fn overlapped_io(application_port: &str, peer_port: &str) -> Result<String, Conf
 
 fn cancel_pending_read(application_port: &str) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, true)?;
+    // COM timeouts are device state and can persist across handles. Explicitly disable them so
+    // this case measures cancellation rather than racing a timeout configured by an earlier run.
+    set_timeout(application.handle(), 0)?;
     let event = Event::new()?;
     let mut overlapped: OVERLAPPED = unsafe { zeroed() };
     overlapped.hEvent = event.handle();
@@ -195,11 +260,14 @@ fn read_timeout(application_port: &str) -> Result<String, ConformanceError> {
     ))
 }
 
-fn purge_receive(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn purge_receive(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, false)?;
-    let peer = Port::open(peer_port, false)?;
+    let mut peer = Peer::open(peer_target)?;
     set_timeout(application.handle(), 500)?;
-    write_sync(peer.handle(), TEST_DATA)?;
+    peer.write_all(TEST_DATA)?;
     std::thread::sleep(Duration::from_millis(50));
     let before = queue_depth(application.handle())?;
     if before == 0 {
@@ -216,14 +284,31 @@ fn purge_receive(application_port: &str, peer_port: &str) -> Result<String, Conf
             "receive queue contains {after} bytes after purge"
         )));
     }
-    Ok(format!("purge removed {before} queued bytes"))
+    if unsafe { PurgeComm(application.handle(), PURGE_TXABORT | PURGE_TXCLEAR) } == 0 {
+        return Err(last_error("PurgeComm transmit"));
+    }
+    Ok(format!(
+        "receive purge removed {before} queued bytes and transmit purge completed"
+    ))
 }
 
-fn wait_comm_event(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn wait_comm_event(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, true)?;
-    let peer = Port::open(peer_port, true)?;
+    let mut peer = Peer::open(peer_target)?;
     if unsafe { SetCommMask(application.handle(), EV_RXCHAR) } == 0 {
         return Err(last_error("SetCommMask"));
+    }
+    let mut configured_mask = 0_u32;
+    if unsafe { GetCommMask(application.handle(), &mut configured_mask) } == 0 {
+        return Err(last_error("GetCommMask"));
+    }
+    if configured_mask != EV_RXCHAR {
+        return Err(ConformanceError::InvalidResult(format!(
+            "GetCommMask returned 0x{configured_mask:08x}"
+        )));
     }
     let event = Event::new()?;
     let mut overlapped: OVERLAPPED = unsafe { zeroed() };
@@ -236,7 +321,7 @@ fn wait_comm_event(application_port: &str, peer_port: &str) -> Result<String, Co
             return Err(win32("WaitCommEvent", error));
         }
     }
-    write_overlapped(peer.handle(), b"E")?;
+    peer.write_all(b"E")?;
     if started == 0 {
         wait_event(event.handle(), IO_WAIT_MS, "WaitCommEvent")?;
         let mut transferred = 0u32;
@@ -267,16 +352,17 @@ fn serial_configuration(
     }
 
     let winkeyer = matches!(profile.name, "n1mm-winkeyer" | "wktools");
-    let command = if winkeyer {
-        "baud=1200 parity=N data=8 stop=2"
-    } else {
-        "baud=9600 parity=N data=8 stop=1"
-    };
     let mut proposed = original;
-    let wide = wide(command);
-    if unsafe { BuildCommDCBW(wide.as_ptr(), &mut proposed) } == 0 {
-        return Err(last_error("BuildCommDCBW"));
-    }
+    proposed.BaudRate = if winkeyer { 1_200 } else { 9_600 };
+    proposed.ByteSize = 8;
+    proposed.Parity = NOPARITY;
+    proposed.StopBits = if winkeyer { TWOSTOPBITS } else { ONESTOPBIT };
+    // Binary mode, CTS output flow, enabled DTR, software XON/XOFF in both directions,
+    // and RTS handshake. Set the DCB directly so this case tests the serial driver rather
+    // than BuildCommDCB's command-string parser.
+    proposed._bitfield = (proposed._bitfield & !(DCB_FLOW_CONTROL_MASK | 1)) | DESIRED_DCB_FLAGS;
+    proposed.XonChar = 0x11;
+    proposed.XoffChar = 0x13;
 
     let result = (|| {
         if unsafe { SetCommState(application.handle(), &proposed) } == 0 {
@@ -293,13 +379,27 @@ fn serial_configuration(
             || observed.ByteSize != 8
             || observed.Parity != NOPARITY
             || observed.StopBits != expected_stop
+            || observed._bitfield & DCB_FLOW_CONTROL_MASK
+                != proposed._bitfield & DCB_FLOW_CONTROL_MASK
+            || observed.XonLim != proposed.XonLim
+            || observed.XoffLim != proposed.XoffLim
+            || observed.XonChar != proposed.XonChar
+            || observed.XoffChar != proposed.XoffChar
         {
             return Err(ConformanceError::InvalidResult(format!(
-                "observed format baud={} data={} parity={} stop={}",
-                observed.BaudRate, observed.ByteSize, observed.Parity, observed.StopBits
+                "observed format/flow baud={} data={} parity={} stop={} flags=0x{:08x}",
+                observed.BaudRate,
+                observed.ByteSize,
+                observed.Parity,
+                observed.StopBits,
+                observed._bitfield & DCB_FLOW_CONTROL_MASK
             )));
         }
-        Ok(format!("serial format accepted: {command}"))
+        Ok(format!(
+            "serial format and flow control accepted: baud={} parity=N data=8 stop={} xon=on octs=on odsr=off dtr=on rts=hs",
+            proposed.BaudRate,
+            if winkeyer { 2 } else { 1 }
+        ))
     })();
 
     let _ = unsafe { SetCommState(application.handle(), &original) };
@@ -324,14 +424,34 @@ fn modem_control(application_port: &str) -> Result<String, ConformanceError> {
     if unsafe { ClearCommBreak(application.handle()) } == 0 {
         return Err(last_error("ClearCommBreak"));
     }
-    Ok("DTR, RTS, and break control requests completed".to_string())
+    let mut modem_status = 0_u32;
+    if unsafe { GetCommModemStatus(application.handle(), &mut modem_status) } == 0 {
+        return Err(last_error("GetCommModemStatus"));
+    }
+    Ok(format!(
+        "DTR, RTS, and break controls completed; modem status 0x{modem_status:08x}"
+    ))
 }
 
-fn queue_status(application_port: &str, peer_port: &str) -> Result<String, ConformanceError> {
+fn queue_status(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
     let application = Port::open(application_port, false)?;
-    let peer = Port::open(peer_port, false)?;
+    let mut peer = Peer::open(peer_target)?;
     set_timeout(application.handle(), 500)?;
-    write_sync(peer.handle(), TEST_DATA)?;
+    let mut properties: COMMPROP = unsafe { zeroed() };
+    if unsafe { GetCommProperties(application.handle(), &mut properties) } == 0 {
+        return Err(last_error("GetCommProperties"));
+    }
+    let expected_capacity = u32::try_from(DRIVER_BUFFER_CAPACITY).unwrap_or(u32::MAX);
+    if properties.dwMaxRxQueue < expected_capacity || properties.dwMaxTxQueue < expected_capacity {
+        return Err(ConformanceError::InvalidResult(format!(
+            "GetCommProperties reported rx={} tx={} bytes",
+            properties.dwMaxRxQueue, properties.dwMaxTxQueue
+        )));
+    }
+    peer.write_all(TEST_DATA)?;
     std::thread::sleep(Duration::from_millis(50));
     let depth = queue_depth(application.handle())?;
     if depth < u32::try_from(TEST_DATA.len()).unwrap_or(u32::MAX) {
@@ -342,6 +462,70 @@ fn queue_status(application_port: &str, peer_port: &str) -> Result<String, Confo
     let received = read_sync(application.handle(), TEST_DATA.len())?;
     require_equal("queue status drain", &received, TEST_DATA)?;
     Ok(format!("ClearCommError reported {depth} queued bytes"))
+}
+
+fn buffer_saturation(
+    application_port: &str,
+    peer_target: PeerTarget<'_>,
+) -> Result<String, ConformanceError> {
+    let application = Port::open(application_port, false)?;
+    let mut peer = Peer::open(peer_target)?;
+    set_timeout(application.handle(), 500)?;
+
+    let oversized = vec![0xA5_u8; DRIVER_BUFFER_CAPACITY + 1];
+    let length = u32::try_from(oversized.len()).map_err(|_| {
+        ConformanceError::InvalidResult("overflow payload is too large".to_string())
+    })?;
+    let mut written = 0_u32;
+    let succeeded = unsafe {
+        WriteFile(
+            application.handle(),
+            oversized.as_ptr(),
+            length,
+            &mut written,
+            null_mut(),
+        )
+    };
+    if succeeded != 0 {
+        return Err(ConformanceError::InvalidResult(
+            "a write larger than the driver buffer unexpectedly succeeded".to_string(),
+        ));
+    }
+    let overflow_error = unsafe { GetLastError() };
+    if written != 0 {
+        return Err(ConformanceError::InvalidResult(format!(
+            "overflowing write reported {written} partially accepted bytes"
+        )));
+    }
+    peer.require_no_data(Duration::from_millis(150))?;
+
+    let marker = b"after-overflow";
+    write_sync(application.handle(), marker)?;
+    let received = peer.read_exact(marker.len())?;
+    require_equal("post-overflow application write", &received, marker)?;
+    Ok(format!(
+        "{}-byte write failed atomically with Win32 error {overflow_error}; handle recovered",
+        oversized.len()
+    ))
+}
+
+fn exclusive_open(application_port: &str) -> Result<String, ConformanceError> {
+    let first = Port::open(application_port, false)?;
+    let second_error = match Port::open(application_port, false) {
+        Ok(_) => {
+            return Err(ConformanceError::InvalidResult(
+                "a second application handle unexpectedly opened the COM port".to_string(),
+            ));
+        }
+        Err(ConformanceError::Win32 { code, .. }) => code,
+        Err(error) => return Err(error),
+    };
+    drop(first);
+    let reopened = Port::open(application_port, false)?;
+    drop(reopened);
+    Ok(format!(
+        "second handle was rejected with Win32 error {second_error}; reopen after close succeeded"
+    ))
 }
 
 fn set_timeout(handle: HANDLE, milliseconds: u32) -> Result<(), ConformanceError> {
@@ -540,6 +724,107 @@ impl Port {
 impl Drop for Port {
     fn drop(&mut self) {
         let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+enum Peer {
+    Serial(Port),
+    Tcp(TcpStream),
+}
+
+impl Peer {
+    fn open(target: PeerTarget<'_>) -> Result<Self, ConformanceError> {
+        match target {
+            PeerTarget::Serial(port) => Ok(Self::Serial(Port::open(port, false)?)),
+            PeerTarget::Tcp(address) => {
+                let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+                stream.set_nodelay(true)?;
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let mut ready = [0_u8; TEST_PEER_READY.len()];
+                Read::read_exact(&mut stream, &mut ready)?;
+                if ready != TEST_PEER_READY {
+                    return Err(ConformanceError::InvalidResult(
+                        "managed test peer returned an invalid readiness preface".to_string(),
+                    ));
+                }
+                Ok(Self::Tcp(stream))
+            }
+        }
+    }
+
+    fn set_timeout(&self, timeout: Duration) -> Result<(), ConformanceError> {
+        match self {
+            Self::Serial(port) => {
+                let milliseconds = u32::try_from(timeout.as_millis()).map_err(|_| {
+                    ConformanceError::InvalidResult("peer timeout exceeds u32".to_string())
+                })?;
+                set_timeout(port.handle(), milliseconds)
+            }
+            Self::Tcp(stream) => {
+                stream.set_read_timeout(Some(timeout))?;
+                stream.set_write_timeout(Some(timeout))?;
+                Ok(())
+            }
+        }
+    }
+
+    fn read_exact(&mut self, length: usize) -> Result<Vec<u8>, ConformanceError> {
+        match self {
+            Self::Serial(port) => read_sync(port.handle(), length),
+            Self::Tcp(stream) => {
+                let mut bytes = vec![0_u8; length];
+                Read::read_exact(stream, &mut bytes)?;
+                Ok(bytes)
+            }
+        }
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), ConformanceError> {
+        match self {
+            Self::Serial(port) => write_sync(port.handle(), bytes),
+            Self::Tcp(stream) => {
+                Write::write_all(stream, bytes)?;
+                Write::flush(stream)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn require_no_data(&mut self, timeout: Duration) -> Result<(), ConformanceError> {
+        match self {
+            Self::Serial(port) => {
+                let milliseconds = u32::try_from(timeout.as_millis()).map_err(|_| {
+                    ConformanceError::InvalidResult("peer timeout exceeds u32".to_string())
+                })?;
+                set_timeout(port.handle(), milliseconds)?;
+                let received = read_sync(port.handle(), 1)?;
+                if received.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ConformanceError::InvalidResult(
+                        "overflowing write leaked data to the serial peer".to_string(),
+                    ))
+                }
+            }
+            Self::Tcp(stream) => {
+                stream.set_read_timeout(Some(timeout))?;
+                let mut byte = [0_u8; 1];
+                match Read::read(stream, &mut byte) {
+                    Err(error)
+                        if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
+                    {
+                        Ok(())
+                    }
+                    Ok(0) => Err(ConformanceError::InvalidResult(
+                        "managed test peer disconnected after buffer overflow".to_string(),
+                    )),
+                    Ok(_) => Err(ConformanceError::InvalidResult(
+                        "overflowing write leaked data to the managed peer".to_string(),
+                    )),
+                    Err(error) => Err(error.into()),
+                }
+            }
+        }
     }
 }
 
